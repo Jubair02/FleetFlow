@@ -1,0 +1,953 @@
+     1→"use client";
+     2→
+     3→import {
+     4→  useCallback,
+     5→  useEffect,
+     6→  useRef,
+     7→  useState,
+     8→  type PointerEvent as ReactPointerEvent,
+     9→  type RefObject,
+    10→} from "react";
+    11→import {
+    12→  AlertTriangle,
+    13→  ArrowUpFromLine,
+    14→  CheckCircle2,
+    15→  Clock,
+    16→  Eraser,
+    17→  History,
+    18→  Info,
+    19→  Loader2,
+    20→  MapPin,
+    21→  PackageCheck,
+    22→  Phone,
+    23→  RefreshCw,
+    24→  Truck,
+    25→  X,
+    26→} from "lucide-react";
+    27→import { toast } from "sonner";
+    28→import { cn } from "@/lib/utils";
+    29→import { api, useApiData } from "@/lib/api-client";
+    30→import { useAppStore } from "@/store/app-store";
+    31→import { EVENT_TYPE_LABELS, FAILURE_REASONS, failureReasonLabel } from "@/lib/constants";
+    32→import { formatDateTime, friendlyDueDate } from "@/lib/format";
+    33→import type { Delivery, DeliveryDetail, MyJob } from "@/lib/types";
+    34→import { PriorityBadge, StatusBadge, VehicleTypeLabel } from "@/components/fleetflow/badges";
+    35→import { Button } from "@/components/ui/button";
+    36→import { Card } from "@/components/ui/card";
+    37→import {
+    38→  Dialog,
+    39→  DialogContent,
+    40→  DialogDescription,
+    41→  DialogFooter,
+    42→  DialogHeader,
+    43→  DialogTitle,
+    44→} from "@/components/ui/dialog";
+    45→import { Input } from "@/components/ui/input";
+    46→import { Label } from "@/components/ui/label";
+    47→import {
+    48→  Select,
+    49→  SelectContent,
+    50→  SelectItem,
+    51→  SelectTrigger,
+    52→  SelectValue,
+    53→} from "@/components/ui/select";
+    54→import { Skeleton } from "@/components/ui/skeleton";
+    55→import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+    56→import { Textarea } from "@/components/ui/textarea";
+    57→
+    58→// ─────────────────────────────────────────────────────────────
+    59→// Small shared pieces
+    60→// ─────────────────────────────────────────────────────────────
+    61→
+    62→function isOverdue(job: Delivery): boolean {
+    63→  if (!job.expectedAt) return false;
+    64→  if (job.status === "DELIVERED" || job.status === "FAILED" || job.status === "CANCELLED") return false;
+    65→  return new Date(job.expectedAt).getTime() < Date.now();
+    66→}
+    67→
+    68→/** Pickup → dropoff route block with a dashed connector (used by cards + detail dialog). */
+    69→function RouteBlock({ job }: { job: Delivery }) {
+    70→  return (
+    71→    <div>
+    72→      <div className="flex items-start gap-3">
+    73→        <span className="flex size-6 shrink-0 items-center justify-center rounded-full bg-muted" aria-hidden="true">
+    74→          <ArrowUpFromLine className="size-3.5 text-muted-foreground" />
+    75→        </span>
+    76→        <p className="min-w-0 pt-0.5 text-sm leading-snug text-muted-foreground">{job.pickupAddress}</p>
+    77→      </div>
+    78→      <div className="ml-[11px] h-4 border-l-2 border-dashed border-border" aria-hidden="true" />
+    79→      <div className="flex items-start gap-3">
+    80→        <span className="flex size-6 shrink-0 items-center justify-center rounded-full bg-muted" aria-hidden="true">
+    81→          <MapPin className="size-3.5 text-muted-foreground" />
+    82→        </span>
+    83→        <p className="min-w-0 pt-0.5 text-sm font-medium leading-snug">{job.deliveryAddress}</p>
+    84→      </div>
+    85→      <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-2 pl-9">
+    86→        <span className="text-sm font-semibold">{job.recipientName}</span>
+    87→        {job.recipientPhone ? (
+    88→          <Button asChild variant="outline" size="sm" className="min-h-11 gap-1.5">
+    89→            <a href={`tel:${job.recipientPhone}`}>
+    90→              <Phone className="size-3.5" aria-hidden="true" />
+    91→              {job.recipientPhone}
+    92→            </a>
+    93→          </Button>
+    94→        ) : null}
+    95→      </div>
+    96→    </div>
+    97→  );
+    98→}
+    99→
+   100→/** Vehicle + expected-time meta row and the amber instructions callout. */
+   101→function MetaBlock({
+   102→  job,
+   103→  registration,
+   104→  vehicleType,
+   105→}: {
+   106→  job: Delivery;
+   107→  registration?: string | null;
+   108→  vehicleType?: string | null;
+   109→}) {
+   110→  const overdue = isOverdue(job);
+   111→  return (
+   112→    <div>
+   113→      <div className="flex flex-wrap gap-x-4 gap-y-1.5 text-xs text-muted-foreground">
+   114→        {registration ? (
+   115→          <span className="inline-flex items-center gap-1.5">
+   116→            <Truck className="size-3.5 shrink-0" aria-hidden="true" />
+   117→            <span className="font-mono font-medium text-foreground">{registration}</span>
+   118→            {vehicleType ? (
+   119→              <span>
+   120→                · <VehicleTypeLabel type={vehicleType} />
+   121→              </span>
+   122→            ) : null}
+   123→          </span>
+   124→        ) : null}
+   125→        <span className="inline-flex items-center gap-1.5">
+   126→          <Clock className="size-3.5 shrink-0" aria-hidden="true" />
+   127→          Expected:{" "}
+   128→          <span className={cn("font-medium", overdue ? "text-rose-600 dark:text-rose-400" : "text-foreground")}>
+   129→            {friendlyDueDate(job.expectedAt)}
+   130→            {overdue ? " (overdue)" : ""}
+   131→          </span>
+   132→        </span>
+   133→      </div>
+   134→      {job.instructions ? (
+   135→        <div className="mt-3 flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm italic text-amber-900 dark:border-amber-900/60 dark:bg-amber-950/40 dark:text-amber-200">
+   136→          <Info className="mt-0.5 size-4 shrink-0 not-italic" aria-hidden="true" />
+   137→          <span className="min-w-0 break-words">{job.instructions}</span>
+   138→        </div>
+   139→      ) : null}
+   140→    </div>
+   141→  );
+   142→}
+   143→
+   144→function JobListSkeleton({ rows = 3 }: { rows?: number }) {
+   145→  return (
+   146→    <div className="flex flex-col gap-4" aria-busy="true" aria-label="Loading jobs">
+   147→      {Array.from({ length: rows }).map((_, i) => (
+   148→        <Card key={i} className="p-5">
+   149→          <div className="flex items-center justify-between gap-2">
+   150→            <Skeleton className="h-5 w-32" />
+   151→            <Skeleton className="h-5 w-28" />
+   152→          </div>
+   153→          <div className="mt-5 flex flex-col gap-3">
+   154→            <Skeleton className="h-4 w-full" />
+   155→            <Skeleton className="h-4 w-3/4" />
+   156→            <Skeleton className="h-4 w-2/3" />
+   157→          </div>
+   158→          <div className="mt-5 grid grid-cols-2 gap-3">
+   159→            <Skeleton className="h-11 w-full" />
+   160→            <Skeleton className="h-11 w-full" />
+   161→          </div>
+   162→        </Card>
+   163→      ))}
+   164→    </div>
+   165→  );
+   166→}
+   167→
+   168→// ─────────────────────────────────────────────────────────────
+   169→// Signature pad — pointer events (touch + mouse + stylus),
+   170→// devicePixelRatio-scaled canvas, strokes stored for crisp redraws.
+   171→// ─────────────────────────────────────────────────────────────
+   172→
+   173→function SignaturePad({
+   174→  canvasRef,
+   175→  onInkChange,
+   176→}: {
+   177→  canvasRef: RefObject<HTMLCanvasElement | null>;
+   178→  onInkChange: (hasInk: boolean) => void;
+   179→}) {
+   180→  const strokesRef = useRef<Array<Array<{ x: number; y: number }>>>([]);
+   181→  const drawingRef = useRef(false);
+   182→  const [inked, setInked] = useState(false);
+   183→
+   184→  const applyStyle = useCallback((ctx: CanvasRenderingContext2D) => {
+   185→    ctx.lineWidth = 2.5;
+   186→    ctx.strokeStyle = "#1e293b";
+   187→    ctx.fillStyle = "#1e293b";
+   188→    ctx.lineCap = "round";
+   189→    ctx.lineJoin = "round";
+   190→  }, []);
+   191→
+   192→  const redraw = useCallback(() => {
+   193→    const canvas = canvasRef.current;
+   194→    const ctx = canvas?.getContext("2d");
+   195→    if (!canvas || !ctx) return;
+   196→    const rect = canvas.getBoundingClientRect();
+   197→    applyStyle(ctx);
+   198→    ctx.clearRect(0, 0, rect.width, rect.height);
+   199→    for (const stroke of strokesRef.current) {
+   200→      if (stroke.length === 0) continue;
+   201→      ctx.beginPath();
+   202→      ctx.moveTo(stroke[0].x, stroke[0].y);
+   203→      if (stroke.length === 1) {
+   204→        ctx.arc(stroke[0].x, stroke[0].y, 1.25, 0, Math.PI * 2);
+   205→        ctx.fill();
+   206→        continue;
+   207→      }
+   208→      for (let i = 1; i < stroke.length; i++) ctx.lineTo(stroke[i].x, stroke[i].y);
+   209→      ctx.stroke();
+   210→    }
+   211→  }, [applyStyle, canvasRef]);
+   212→
+   213→  // Scale the backing store by devicePixelRatio for crisp lines; re-run on resize
+   214→  // (dialog open animation, rotation) and replay stored strokes.
+   215→  useEffect(() => {
+   216→    const canvas = canvasRef.current;
+   217→    if (!canvas) return;
+   218→    const resize = () => {
+   219→      const rect = canvas.getBoundingClientRect();
+   220→      if (rect.width < 2 || rect.height < 2) return;
+   221→      const dpr = window.devicePixelRatio || 1;
+   222→      canvas.width = Math.round(rect.width * dpr);
+   223→      canvas.height = Math.round(rect.height * dpr);
+   224→      const ctx = canvas.getContext("2d");
+   225→      if (!ctx) return;
+   226→      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+   227→      redraw();
+   228→    };
+   229→    resize();
+   230→    const observer = new ResizeObserver(resize);
+   231→    observer.observe(canvas);
+   232→    return () => observer.disconnect();
+   233→  }, [canvasRef, redraw]);
+   234→
+   235→  const pointerPos = (e: ReactPointerEvent<HTMLCanvasElement>) => {
+   236→    const rect = e.currentTarget.getBoundingClientRect();
+   237→    return { x: e.clientX - rect.left, y: e.clientY - rect.top };
+   238→  };
+   239→
+   240→  const handlePointerDown = (e: ReactPointerEvent<HTMLCanvasElement>) => {
+   241→    e.preventDefault();
+   242→    try {
+   243→      e.currentTarget.setPointerCapture(e.pointerId);
+   244→    } catch {
+   245→      /* pointer already released */
+   246→    }
+   247→    drawingRef.current = true;
+   248→    const ctx = e.currentTarget.getContext("2d");
+   249→    if (!ctx) return;
+   250→    applyStyle(ctx);
+   251→    const p = pointerPos(e);
+   252→    strokesRef.current.push([p]);
+   253→    ctx.beginPath();
+   254→    ctx.arc(p.x, p.y, 1.25, 0, Math.PI * 2);
+   255→    ctx.fill();
+   256→  };
+   257→
+   258→  const handlePointerMove = (e: ReactPointerEvent<HTMLCanvasElement>) => {
+   259→    if (!drawingRef.current) return;
+   260→    const stroke = strokesRef.current[strokesRef.current.length - 1];
+   261→    const ctx = e.currentTarget.getContext("2d");
+   262→    if (!stroke || !ctx) return;
+   263→    const p = pointerPos(e);
+   264→    const prev = stroke[stroke.length - 1];
+   265→    applyStyle(ctx);
+   266→    ctx.beginPath();
+   267→    ctx.moveTo(prev.x, prev.y);
+   268→    ctx.lineTo(p.x, p.y);
+   269→    ctx.stroke();
+   270→    stroke.push(p);
+   271→    if (stroke.length >= 2 && !inked) {
+   272→      setInked(true);
+   273→      onInkChange(true);
+   274→    }
+   275→  };
+   276→
+   277→  const endStroke = () => {
+   278→    drawingRef.current = false;
+   279→  };
+   280→
+   281→  const clear = () => {
+   282→    strokesRef.current = [];
+   283→    drawingRef.current = false;
+   284→    const canvas = canvasRef.current;
+   285→    const ctx = canvas?.getContext("2d");
+   286→    if (canvas && ctx) {
+   287→      const rect = canvas.getBoundingClientRect();
+   288→      applyStyle(ctx);
+   289→      ctx.clearRect(0, 0, rect.width, rect.height);
+   290→    }
+   291→    setInked(false);
+   292→    onInkChange(false);
+   293→  };
+   294→
+   295→  return (
+   296→    <div className="flex flex-col gap-2">
+   297→      <div className="flex items-center justify-between gap-2">
+   298→        <Label>Recipient signature</Label>
+   299→        <Button type="button" variant="ghost" size="sm" className="h-9 gap-1.5" onClick={clear}>
+   300→          <Eraser className="size-3.5" aria-hidden="true" /> Clear
+   301→        </Button>
+   302→      </div>
+   303→      <canvas
+   304→        ref={canvasRef}
+   305→        onPointerDown={handlePointerDown}
+   306→        onPointerMove={handlePointerMove}
+   307→        onPointerUp={endStroke}
+   308→        onPointerCancel={endStroke}
+   309→        onLostPointerCapture={endStroke}
+   310→        className="h-44 w-full touch-none cursor-crosshair rounded-lg border bg-white"
+   311→        role="img"
+   312→        aria-label="Signature pad — draw the recipient's signature with your finger or a stylus"
+   313→      />
+   314→      <p className="text-xs text-muted-foreground">Draw with a finger or stylus — a signature or a photo is required.</p>
+   315→    </div>
+   316→  );
+   317→}
+   318→
+   319→// ─────────────────────────────────────────────────────────────
+   320→// POD dialog — complete delivery with signature OR photo proof
+   321→// ─────────────────────────────────────────────────────────────
+   322→
+   323→function PodDialog({ job, onClose, onCompleted }: { job: MyJob; onClose: () => void; onCompleted: () => void }) {
+   324→  const [recipientName, setRecipientName] = useState(job.recipientName);
+   325→  const [hasSignature, setHasSignature] = useState(false);
+   326→  const [photoFile, setPhotoFile] = useState<File | null>(null);
+   327→  const [photoUrl, setPhotoUrl] = useState<string | null>(null);
+   328→  const [submitting, setSubmitting] = useState(false);
+   329→  const [tried, setTried] = useState(false);
+   330→  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+   331→  const photoUrlRef = useRef<string | null>(null);
+   332→
+   333→  useEffect(
+   334→    () => () => {
+   335→      if (photoUrlRef.current) URL.revokeObjectURL(photoUrlRef.current);
+   336→    },
+   337→    [],
+   338→  );
+   339→
+   340→  const pickPhoto = (file: File | null) => {
+   341→    if (photoUrlRef.current) {
+   342→      URL.revokeObjectURL(photoUrlRef.current);
+   343→      photoUrlRef.current = null;
+   344→    }
+   345→    setPhotoFile(file);
+   346→    if (file) {
+   347→      const url = URL.createObjectURL(file);
+   348→      photoUrlRef.current = url;
+   349→      setPhotoUrl(url);
+   350→    } else {
+   351→      setPhotoUrl(null);
+   352→    }
+   353→  };
+   354→
+   355→  const nameMissing = tried && !recipientName.trim();
+   356→  const proofMissing = tried && !hasSignature && !photoFile;
+   357→
+   358→  const submit = async () => {
+   359→    setTried(true);
+   360→    const name = recipientName.trim();
+   361→    if (!name) {
+   362→      toast.error("Enter the recipient's name to continue");
+   363→      return;
+   364→    }
+   365→    if (!hasSignature && !photoFile) {
+   366→      toast.error("Capture a signature or attach a photo before completing");
+   367→      return;
+   368→    }
+   369→    setSubmitting(true);
+   370→    try {
+   371→      const form = new FormData();
+   372→      form.append("recipientName", name);
+   373→      form.append("complete", "true");
+   374→      if (hasSignature && canvasRef.current) {
+   375→        const canvas = canvasRef.current;
+   376→        const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/png"));
+   377→        if (!blob) throw new Error("Could not read the signature — try again or attach a photo");
+   378→        form.append("file", new File([blob], `${job.trackingCode}-signature.png`, { type: "image/png" }));
+   379→        form.append("kind", "SIGNATURE");
+   380→      } else if (photoFile) {
+   381→        form.append("file", photoFile, photoFile.name);
+   382→        form.append("kind", "PHOTO");
+   383→      } else {
+   384→        throw new Error("No proof captured");
+   385→      }
+   386→      await api.post(`/api/deliveries/${job.id}/pod`, form);
+   387→      toast.success("Delivery completed — proof recorded");
+   388→      onCompleted();
+   389→    } catch (e) {
+   390→      toast.error(e instanceof Error ? e.message : "Could not record proof of delivery");
+   391→    } finally {
+   392→      setSubmitting(false);
+   393→    }
+   394→  };
+   395→
+   396→  return (
+   397→    <Dialog open onOpenChange={(open) => { if (!open && !submitting) onClose(); }}>
+   398→      <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-md">
+   399→        <DialogHeader>
+   400→          <DialogTitle>Complete delivery</DialogTitle>
+   401→          <DialogDescription>
+   402→            Record proof of delivery for <span className="font-mono font-medium text-foreground">{job.trackingCode}</span>.
+   403→          </DialogDescription>
+   404→        </DialogHeader>
+   405→
+   406→        <div className="flex flex-col gap-4">
+   407→          <div className="flex flex-col gap-2">
+   408→            <Label htmlFor="pod-recipient">Recipient name *</Label>
+   409→            <Input
+   410→              id="pod-recipient"
+   411→              value={recipientName}
+   412→              onChange={(e) => setRecipientName(e.target.value)}
+   413→              placeholder="Who received the package?"
+   414→              autoComplete="off"
+   415→              className="h-11"
+   416→              aria-invalid={nameMissing}
+   417→            />
+   418→            {nameMissing && <p className="text-xs text-rose-600 dark:text-rose-400">Recipient name is required.</p>}
+   419→          </div>
+   420→
+   421→          <SignaturePad canvasRef={canvasRef} onInkChange={setHasSignature} />
+   422→
+   423→          <div className="flex items-center gap-3" aria-hidden="true">
+   424→            <span className="h-px flex-1 bg-border" />
+   425→            <span className="text-xs uppercase tracking-wide text-muted-foreground">or</span>
+   426→            <span className="h-px flex-1 bg-border" />
+   427→          </div>
+   428→
+   429→          <div className="flex flex-col gap-2">
+   430→            <Label htmlFor="pod-photo">Photo proof (optional alternative)</Label>
+   431→            <Input
+   432→              id="pod-photo"
+   433→              key={photoUrl ? "picked" : "empty"}
+   434→              type="file"
+   435→              accept="image/png,image/jpeg,image/webp"
+   436→              onChange={(e) => pickPhoto(e.target.files?.[0] ?? null)}
+   437→              className="h-11"
+   438→            />
+   439→            {proofMissing && (
+   440→              <p className="text-xs text-rose-600 dark:text-rose-400">Add a signature or a photo to complete the delivery.</p>
+   441→            )}
+   442→            {photoUrl && photoFile ? (
+   443→              <div className="flex items-start gap-3 rounded-lg border bg-muted/40 p-3">
+   444→                {/* eslint-disable-next-line @next/next/no-img-element */}
+   445→                <img src={photoUrl} alt="Photo proof preview" className="size-20 shrink-0 rounded-md border object-cover" />
+   446→                <div className="flex min-w-0 flex-1 flex-col items-start gap-1">
+   447→                  <p className="w-full truncate text-xs font-medium">{photoFile.name}</p>
+   448→                  <p className="text-[11px] text-muted-foreground">{Math.max(1, Math.round(photoFile.size / 1024))} KB</p>
+   449→                  <Button
+   450→                    type="button"
+   451→                    variant="outline"
+   452→                    size="sm"
+   453→                    className="mt-1 gap-1.5"
+   454→                    onClick={() => pickPhoto(null)}
+   455→                    disabled={submitting}
+   456→                  >
+   457→                    <X className="size-3.5" aria-hidden="true" /> Remove photo
+   458→                  </Button>
+   459→                </div>
+   460→              </div>
+   461→            ) : null}
+   462→          </div>
+   463→        </div>
+   464→
+   465→        <DialogFooter>
+   466→          <Button type="button" variant="outline" onClick={onClose} disabled={submitting} className="min-h-11">
+   467→            Cancel
+   468→          </Button>
+   469→          <Button type="button" onClick={submit} disabled={submitting} className="min-h-11">
+   470→            {submitting ? <Loader2 className="size-4 animate-spin" aria-hidden="true" /> : <CheckCircle2 className="size-4" aria-hidden="true" />}
+   471→            {submitting ? "Recording…" : "Complete delivery"}
+   472→          </Button>
+   473→        </DialogFooter>
+   474→      </DialogContent>
+   475→    </Dialog>
+   476→  );
+   477→}
+   478→
+   479→// ─────────────────────────────────────────────────────────────
+   480→// Report problem dialog — mark a job FAILED with a reason
+   481→// ─────────────────────────────────────────────────────────────
+   482→
+   483→function ReportProblemDialog({ job, onClose, onReported }: { job: MyJob; onClose: () => void; onReported: () => void }) {
+   484→  const [reason, setReason] = useState<string>("");
+   485→  const [note, setNote] = useState("");
+   486→  const [submitting, setSubmitting] = useState(false);
+   487→  const [tried, setTried] = useState(false);
+   488→
+   489→  const submit = async () => {
+   490→    setTried(true);
+   491→    if (!reason) {
+   492→      toast.error("Select what went wrong");
+   493→      return;
+   494→    }
+   495→    setSubmitting(true);
+   496→    try {
+   497→      const body: { status: "FAILED"; failureReason: string; note?: string } = {
+   498→        status: "FAILED",
+   499→        failureReason: reason,
+   500→      };
+   501→      if (note.trim()) body.note = note.trim();
+   502→      await api.post(`/api/deliveries/${job.id}/status`, body);
+   503→      toast.success("Problem reported — the dispatcher has been notified");
+   504→      onReported();
+   505→    } catch (e) {
+   506→      toast.error(e instanceof Error ? e.message : "Could not report the problem");
+   507→    } finally {
+   508→      setSubmitting(false);
+   509→    }
+   510→  };
+   511→
+   512→  return (
+   513→    <Dialog open onOpenChange={(open) => { if (!open && !submitting) onClose(); }}>
+   514→      <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-md">
+   515→        <DialogHeader>
+   516→          <DialogTitle>Report a problem</DialogTitle>
+   517→          <DialogDescription>
+   518→            Mark <span className="font-mono font-medium text-foreground">{job.trackingCode}</span> as failed and alert your dispatcher.
+   519→          </DialogDescription>
+   520→        </DialogHeader>
+   521→
+   522→        <div className="flex flex-col gap-4">
+   523→          <div className="flex flex-col gap-2">
+   524→            <Label>What went wrong? *</Label>
+   525→            <Select value={reason} onValueChange={setReason}>
+   526→              <SelectTrigger className="h-11 w-full" aria-label="Failure reason">
+   527→                <SelectValue placeholder="Select a reason" />
+   528→              </SelectTrigger>
+   529→              <SelectContent>
+   530→                {FAILURE_REASONS.map((r) => (
+   531→                  <SelectItem key={r.code} value={r.code}>
+   532→                    {r.label}
+   533→                  </SelectItem>
+   534→                ))}
+   535→              </SelectContent>
+   536→            </Select>
+   537→            {tried && !reason && <p className="text-xs text-rose-600 dark:text-rose-400">Select a reason so dispatch knows what happened.</p>}
+   538→          </div>
+   539→
+   540→          <div className="flex flex-col gap-2">
+   541→            <Label htmlFor="report-note">Internal note (optional)</Label>
+   542→            <Textarea
+   543→              id="report-note"
+   544→              rows={3}
+   545→              value={note}
+   546→              onChange={(e) => setNote(e.target.value)}
+   547→              placeholder="Anything dispatch should know — visible to your team only."
+   548→            />
+   549→          </div>
+   550→
+   551→          <div
+   552→            className="flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800 dark:border-amber-900/60 dark:bg-amber-950/40 dark:text-amber-200"
+   553→            role="status"
+   554→          >
+   555→            <AlertTriangle className="mt-0.5 size-4 shrink-0" aria-hidden="true" />
+   556→            <span>The dispatcher is notified immediately.</span>
+   557→          </div>
+   558→        </div>
+   559→
+   560→        <DialogFooter>
+   561→          <Button type="button" variant="outline" onClick={onClose} disabled={submitting} className="min-h-11">
+   562→            Cancel
+   563→          </Button>
+   564→          <Button type="button" variant="destructive" onClick={submit} disabled={submitting} className="min-h-11">
+   565→            {submitting ? <Loader2 className="size-4 animate-spin" aria-hidden="true" /> : <AlertTriangle className="size-4" aria-hidden="true" />}
+   566→            {submitting ? "Reporting…" : "Report problem"}
+   567→          </Button>
+   568→        </DialogFooter>
+   569→      </DialogContent>
+   570→    </Dialog>
+   571→  );
+   572→}
+   573→
+   574→// ─────────────────────────────────────────────────────────────
+   575→// Job detail dialog — opened via focusDeliveryId (notifications etc.)
+   576→// ─────────────────────────────────────────────────────────────
+   577→
+   578→function eventDotColor(eventType: string): string {
+   579→  if (eventType === "DELIVERED") return "bg-emerald-500";
+   580→  if (eventType === "FAILED") return "bg-rose-500";
+   581→  return "bg-zinc-300 dark:bg-zinc-600";
+   582→}
+   583→
+   584→function JobDetailDialog() {
+   585→  const focusDeliveryId = useAppStore((s) => s.focusDeliveryId);
+   586→  const focusDelivery = useAppStore((s) => s.focusDelivery);
+   587→  const { data, loading, error, reload } = useApiData<DeliveryDetail>(
+   588→    focusDeliveryId ? `/api/deliveries/${focusDeliveryId}` : null,
+   589→  );
+   590→  const detail = data && data.delivery.id === focusDeliveryId ? data : null;
+   591→  const job = detail?.delivery;
+   592→
+   593→  return (
+   594→    <Dialog open={!!focusDeliveryId} onOpenChange={(open) => { if (!open) focusDelivery(null); }}>
+   595→      <DialogContent className="max-h-[88vh] overflow-y-auto sm:max-w-lg">
+   596→        <DialogHeader>
+   597→          <DialogTitle className="flex flex-wrap items-center gap-2 pr-8">
+   598→            <span className="font-mono">{job?.trackingCode ?? "Job details"}</span>
+   599→            {job ? (
+   600→              <>
+   601→                <PriorityBadge priority={job.priority} />
+   602→                <StatusBadge status={job.status} />
+   603→              </>
+   604→            ) : null}
+   605→          </DialogTitle>
+   606→          <DialogDescription>Full job record — route, timeline and proof of delivery.</DialogDescription>
+   607→        </DialogHeader>
+   608→
+   609→        {loading && !detail ? (
+   610→          <div className="flex flex-col gap-4" aria-busy="true">
+   611→            <Skeleton className="h-5 w-40" />
+   612→            <Skeleton className="h-4 w-full" />
+   613→            <Skeleton className="h-4 w-3/4" />
+   614→            <Skeleton className="h-36 w-full" />
+   615→          </div>
+   616→        ) : error && !detail ? (
+   617→          <Card className="flex flex-col items-center gap-3 p-6 text-center">
+   618→            <AlertTriangle className="size-8 text-amber-500" aria-hidden="true" />
+   619→            <p className="text-sm text-muted-foreground">{error}</p>
+   620→            <Button type="button" variant="outline" className="min-h-11" onClick={reload}>
+   621→              <RefreshCw className="size-4" aria-hidden="true" /> Try again
+   622→            </Button>
+   623→          </Card>
+   624→        ) : detail && job ? (
+   625→          <div className="flex flex-col gap-5">
+   626→            <RouteBlock job={job} />
+   627→            <MetaBlock
+   628→              job={job}
+   629→              registration={job.assignment?.vehicleRegistration ?? null}
+   630→              vehicleType={job.assignment?.vehicleType ?? null}
+   631→            />
+   632→
+   633→            <div>
+   634→              <h3 className="mb-3 text-sm font-semibold">Timeline</h3>
+   635→              {detail.events.length === 0 ? (
+   636→                <p className="text-sm text-muted-foreground">No events recorded yet.</p>
+   637→              ) : (
+   638→                <ol className="max-h-72 overflow-y-auto pr-2 [scrollbar-width:thin]">
+   639→                  {detail.events
+   640→                    .slice()
+   641→                    .reverse()
+   642→                    .map((ev) => (
+   643→                      <li key={ev.id} className="relative border-l pb-4 pl-5 last:border-transparent last:pb-0">
+   644→                        <span
+   645→                          className={cn("absolute -left-[5px] top-1 size-2.5 rounded-full ring-4 ring-background", eventDotColor(ev.eventType))}
+   646→                          aria-hidden="true"
+   647→                        />
+   648→                        <div className="flex flex-wrap items-baseline gap-x-2">
+   649→                          <span className="text-sm font-medium">{EVENT_TYPE_LABELS[ev.eventType] ?? ev.eventType}</span>
+   650→                          <span className="text-xs text-muted-foreground">{formatDateTime(ev.createdAt)}</span>
+   651→                        </div>
+   652→                        {ev.note ? <p className="mt-0.5 break-words text-sm text-muted-foreground">{ev.note}</p> : null}
+   653→                        {ev.actorName ? <p className="mt-0.5 text-xs text-muted-foreground/70">by {ev.actorName}</p> : null}
+   654→                      </li>
+   655→                    ))}
+   656→                </ol>
+   657→              )}
+   658→            </div>
+   659→
+   660→            {detail.pods.length > 0 ? (
+   661→              <div>
+   662→                <h3 className="mb-3 text-sm font-semibold">Proof of delivery</h3>
+   663→                <div className="flex flex-wrap gap-3">
+   664→                  {detail.pods.map((pod) => (
+   665→                    <figure key={pod.id} className="w-28">
+   666→                      {/* eslint-disable-next-line @next/next/no-img-element */}
+   667→                      <img
+   668→                        src={`/api/pod/${pod.id}`}
+   669→                        alt={`${pod.kind === "PHOTO" ? "Photo" : "Signature"} proof for ${job.trackingCode}`}
+   670→                        className="h-20 w-28 rounded-md border object-cover"
+   671→                      />
+   672→                      <figcaption className="mt-1 text-[11px] leading-snug text-muted-foreground">
+   673→                        {pod.kind === "PHOTO" ? "Photo" : "Signature"} · {formatDateTime(pod.capturedAt)}
+   674→                      </figcaption>
+   675→                    </figure>
+   676→                  ))}
+   677→                </div>
+   678→              </div>
+   679→            ) : null}
+   680→          </div>
+   681→        ) : null}
+   682→      </DialogContent>
+   683→    </Dialog>
+   684→  );
+   685→}
+   686→
+   687→// ─────────────────────────────────────────────────────────────
+   688→// Active job card
+   689→// ─────────────────────────────────────────────────────────────
+   690→
+   691→function ActiveJobCard({
+   692→  job,
+   693→  busy,
+   694→  onTransition,
+   695→  onOpenPod,
+   696→  onOpenReport,
+   697→}: {
+   698→  job: MyJob;
+   699→  busy: boolean;
+   700→  onTransition: (job: MyJob, status: "PICKED_UP" | "IN_TRANSIT") => void;
+   701→  onOpenPod: (job: MyJob) => void;
+   702→  onOpenReport: (job: MyJob) => void;
+   703→}) {
+   704→  const registration = job.vehicle?.registrationNumber ?? job.assignment?.vehicleRegistration ?? null;
+   705→  const vehicleType = job.vehicle?.type ?? job.assignment?.vehicleType ?? null;
+   706→
+   707→  return (
+   708→    <Card className="p-5">
+   709→      <div className="flex flex-wrap items-center gap-2">
+   710→        <span className="font-mono text-sm font-semibold">{job.trackingCode}</span>
+   711→        <span className="ml-auto flex items-center gap-1.5">
+   712→          <PriorityBadge priority={job.priority} />
+   713→          <StatusBadge status={job.status} />
+   714→        </span>
+   715→      </div>
+   716→
+   717→      <div className="mt-4">
+   718→        <RouteBlock job={job} />
+   719→      </div>
+   720→
+   721→      <div className="mt-4">
+   722→        <MetaBlock job={job} registration={registration} vehicleType={vehicleType} />
+   723→      </div>
+   724→
+   725→      <div className="mt-5 grid grid-cols-2 gap-3">
+   726→        {job.status === "ASSIGNED" ? (
+   727→          <Button className="min-h-11" disabled={busy} onClick={() => onTransition(job, "PICKED_UP")}>
+   728→            {busy ? <Loader2 className="size-4 animate-spin" aria-hidden="true" /> : <PackageCheck className="size-4" aria-hidden="true" />}
+   729→            Confirm pickup
+   730→          </Button>
+   731→        ) : null}
+   732→        {job.status === "PICKED_UP" ? (
+   733→          <Button className="min-h-11" disabled={busy} onClick={() => onTransition(job, "IN_TRANSIT")}>
+   734→            {busy ? <Loader2 className="size-4 animate-spin" aria-hidden="true" /> : <Truck className="size-4" aria-hidden="true" />}
+   735→            Start delivery
+   736→          </Button>
+   737→        ) : null}
+   738→        {job.status === "IN_TRANSIT" ? (
+   739→          <Button className="min-h-11" onClick={() => onOpenPod(job)}>
+   740→            <CheckCircle2 className="size-4" aria-hidden="true" />
+   741→            Complete delivery
+   742→          </Button>
+   743→        ) : null}
+   744→        <Button variant="outline" className="min-h-11" disabled={busy} onClick={() => onOpenReport(job)}>
+   745→          <AlertTriangle className="size-4" aria-hidden="true" />
+   746→          Report problem
+   747→        </Button>
+   748→      </div>
+   749→    </Card>
+   750→  );
+   751→}
+   752→
+   753→// ─────────────────────────────────────────────────────────────
+   754→// History card (compact)
+   755→// ─────────────────────────────────────────────────────────────
+   756→
+   757→function HistoryCard({ job }: { job: MyJob }) {
+   758→  return (
+   759→    <Card className="p-4">
+   760→      <div className="flex flex-wrap items-center gap-2">
+   761→        <span className="font-mono text-sm font-semibold">{job.trackingCode}</span>
+   762→        <span className="ml-auto flex items-center gap-1.5">
+   763→          <PriorityBadge priority={job.priority} />
+   764→          <StatusBadge status={job.status} />
+   765→        </span>
+   766→      </div>
+   767→      <div className="mt-2 flex flex-wrap items-baseline gap-x-2 gap-y-0.5 text-sm">
+   768→        <span className="font-medium">{job.recipientName}</span>
+   769→        {job.status === "DELIVERED" && job.completedAt ? (
+   770→          <span className="text-muted-foreground">Completed {formatDateTime(job.completedAt)}</span>
+   771→        ) : null}
+   772→        {job.status === "FAILED" ? (
+   773→          <span className="text-rose-600 dark:text-rose-400">{failureReasonLabel(job.failureReason)}</span>
+   774→        ) : null}
+   775→        {job.status === "CANCELLED" ? <span className="text-muted-foreground">Cancelled</span> : null}
+   776→      </div>
+   777→    </Card>
+   778→  );
+   779→}
+   780→
+   781→// ─────────────────────────────────────────────────────────────
+   782→// Driver portal view
+   783→// ─────────────────────────────────────────────────────────────
+   784→
+   785→export default function DriverPortalView() {
+   786→  const view = useAppStore((s) => s.view);
+   787→  const setView = useAppStore((s) => s.setView);
+   788→  const [tab, setTab] = useState<"active" | "history">(view === "driver-history" ? "history" : "active");
+   789→  const [busyId, setBusyId] = useState<string | null>(null);
+   790→  const [podJob, setPodJob] = useState<MyJob | null>(null);
+   791→  const [reportJob, setReportJob] = useState<MyJob | null>(null);
+   792→
+   793→  const active = useApiData<{ items: MyJob[] }>("/api/my/jobs");
+   794→  const history = useApiData<{ items: MyJob[] }>(tab === "history" ? "/api/my/jobs?scope=history" : null);
+   795→
+   796→  // Keep the tab in sync when navigation happens elsewhere (bottom nav, notifications).
+   797→  useEffect(() => {
+   798→    if (view === "driver-jobs") setTab((t) => (t === "active" ? t : "active"));
+   799→    else if (view === "driver-history") setTab((t) => (t === "history" ? t : "history"));
+   800→  }, [view]);
+   801→
+   802→  const handleTabChange = (value: string) => {
+   803→    const next: "active" | "history" = value === "history" ? "history" : "active";
+   804→    setTab(next);
+   805→    setView(next === "active" ? "driver-jobs" : "driver-history");
+   806→  };
+   807→
+   808→  const transition = async (job: MyJob, status: "PICKED_UP" | "IN_TRANSIT") => {
+   809→    setBusyId(job.id);
+   810→    try {
+   811→      await api.post(`/api/deliveries/${job.id}/status`, { status });
+   812→      toast.success(status === "PICKED_UP" ? "Pickup confirmed — package is with you" : "Delivery started — you are on the way");
+   813→      useAppStore.getState().bump();
+   814→      active.reload();
+   815→    } catch (e) {
+   816→      toast.error(e instanceof Error ? e.message : "Could not update the job");
+   817→    } finally {
+   818→      setBusyId(null);
+   819→    }
+   820→  };
+   821→
+   822→  const activeItems = active.data?.items ?? [];
+   823→  const historyItems = history.data?.items ?? [];
+   824→  const completedCount = historyItems.filter((j) => j.status === "DELIVERED").length;
+   825→  const failedCount = historyItems.filter((j) => j.status === "FAILED").length;
+   826→  const onTimeCount = historyItems.filter(
+   827→    (j) => j.status === "DELIVERED" && (!j.expectedAt || (j.completedAt && new Date(j.completedAt).getTime() <= new Date(j.expectedAt).getTime())),
+   828→  ).length;
+   829→
+   830→  return (
+   831→    <div className="mx-auto w-full max-w-3xl">
+   832→      <Tabs value={tab} onValueChange={handleTabChange}>
+   833→        <TabsList className="h-12 w-full">
+   834→          <TabsTrigger value="active" className="gap-1.5 text-sm">
+   835→            <PackageCheck className="size-4" aria-hidden="true" /> Active jobs
+   836→          </TabsTrigger>
+   837→          <TabsTrigger value="history" className="gap-1.5 text-sm">
+   838→            <History className="size-4" aria-hidden="true" /> History
+   839→          </TabsTrigger>
+   840→        </TabsList>
+   841→
+   842→        {/* ── Active jobs ── */}
+   843→        <TabsContent value="active" className="mt-4">
+   844→          {active.loading && !active.data ? (
+   845→            <JobListSkeleton />
+   846→          ) : active.error && !active.data ? (
+   847→            <Card className="flex flex-col items-center gap-3 p-8 text-center">
+   848→              <AlertTriangle className="size-8 text-amber-500" aria-hidden="true" />
+   849→              <p className="text-sm text-muted-foreground">{active.error}</p>
+   850→              <Button variant="outline" className="min-h-11" onClick={active.reload}>
+   851→                <RefreshCw className="size-4" aria-hidden="true" /> Try again
+   852→              </Button>
+   853→            </Card>
+   854→          ) : activeItems.length === 0 ? (
+   855→            <Card className="flex flex-col items-center gap-3 p-10 text-center">
+   856→              <div className="flex size-14 items-center justify-center rounded-full bg-primary/10">
+   857→                <PackageCheck className="size-7 text-primary" aria-hidden="true" />
+   858→              </div>
+   859→              <div>
+   860→                <p className="font-medium">No active jobs right now</p>
+   861→                <p className="mt-1 text-sm text-muted-foreground">Check back after dispatch assigns you a delivery.</p>
+   862→              </div>
+   863→            </Card>
+   864→          ) : (
+   865→            <div className="flex flex-col gap-4">
+   866→              {activeItems.map((job) => (
+   867→                <ActiveJobCard
+   868→                  key={job.id}
+   869→                  job={job}
+   870→                  busy={busyId === job.id}
+   871→                  onTransition={transition}
+   872→                  onOpenPod={setPodJob}
+   873→                  onOpenReport={setReportJob}
+   874→                />
+   875→              ))}
+   876→            </div>
+   877→          )}
+   878→        </TabsContent>
+   879→
+   880→        {/* ── History ── */}
+   881→        <TabsContent value="history" className="mt-4">
+   882→          {history.loading && !history.data ? (
+   883→            <JobListSkeleton />
+   884→          ) : history.error && !history.data ? (
+   885→            <Card className="flex flex-col items-center gap-3 p-8 text-center">
+   886→              <AlertTriangle className="size-8 text-amber-500" aria-hidden="true" />
+   887→              <p className="text-sm text-muted-foreground">{history.error}</p>
+   888→              <Button variant="outline" className="min-h-11" onClick={history.reload}>
+   889→                <RefreshCw className="size-4" aria-hidden="true" /> Try again
+   890→              </Button>
+   891→            </Card>
+   892→          ) : historyItems.length === 0 ? (
+   893→            <Card className="flex flex-col items-center gap-3 p-10 text-center">
+   894→              <div className="flex size-14 items-center justify-center rounded-full bg-muted">
+   895→                <History className="size-7 text-muted-foreground" aria-hidden="true" />
+   896→              </div>
+   897→              <div>
+   898→                <p className="font-medium">No completed jobs yet</p>
+   899→                <p className="mt-1 text-sm text-muted-foreground">Finished and failed deliveries will appear here.</p>
+   900→              </div>
+   901→            </Card>
+   902→          ) : (
+   903→            <div className="flex flex-col gap-4">
+   904→              <div className="flex flex-wrap items-center gap-2">
+   905→                <span className="inline-flex min-h-8 items-center rounded-full border border-emerald-200 bg-emerald-50 px-3 text-xs font-medium text-emerald-700 dark:border-emerald-900 dark:bg-emerald-950/40 dark:text-emerald-300">
+   906→                  {completedCount} completed
+   907→                </span>
+   908→                <span className="inline-flex min-h-8 items-center rounded-full border border-rose-200 bg-rose-50 px-3 text-xs font-medium text-rose-700 dark:border-rose-900 dark:bg-rose-950/40 dark:text-rose-300">
+   909→                  {failedCount} failed
+   910→                </span>
+   911→                <span className="inline-flex min-h-8 items-center rounded-full border bg-card px-3 text-xs font-medium text-muted-foreground">
+   912→                  {onTimeCount} on-time
+   913→                </span>
+   914→              </div>
+   915→              <div className="flex max-h-[62vh] flex-col gap-3 overflow-y-auto pr-1 [scrollbar-width:thin]">
+   916→                {historyItems.map((job) => (
+   917→                  <HistoryCard key={job.id} job={job} />
+   918→                ))}
+   919→              </div>
+   920→            </div>
+   921→          )}
+   922→        </TabsContent>
+   923→      </Tabs>
+   924→
+   925→      {podJob ? (
+   926→        <PodDialog
+   927→          job={podJob}
+   928→          onClose={() => setPodJob(null)}
+   929→          onCompleted={() => {
+   930→            useAppStore.getState().bump();
+   931→            active.reload();
+   932→            setPodJob(null);
+   933→          }}
+   934→        />
+   935→      ) : null}
+   936→
+   937→      {reportJob ? (
+   938→        <ReportProblemDialog
+   939→          job={reportJob}
+   940→          onClose={() => setReportJob(null)}
+   941→          onReported={() => {
+   942→            useAppStore.getState().bump();
+   943→            active.reload();
+   944→            setReportJob(null);
+   945→          }}
+   946→        />
+   947→      ) : null}
+   948→
+   949→      <JobDetailDialog />
+   950→    </div>
+   951→  );
+   952→}
+   953→

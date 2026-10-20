@@ -1,0 +1,194 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// ─────────────────────────────────────────────────────────────
+// FleetFlow schema — multi-tenant, org-scoped, auditable
+// ─────────────────────────────────────────────────────────────
+
+model Organization {
+  id        String   @id @default(cuid())
+  name      String
+  plan      String   @default("trial")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  users      User[]
+  vehicles   Vehicle[]
+  deliveries Delivery[]
+  auditLogs  AuditLog[]
+}
+
+model User {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+  name           String
+  email          String       @unique
+  passwordHash   String
+  role           String // ADMIN | DRIVER
+  active         Boolean      @default(true)
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  driverProfile DriverProfile?
+  sessions      Session[]
+  notifications Notification[]
+  assignments   Assignment[]      @relation("DriverAssignments")
+  events        DeliveryEvent[]   @relation("EventActor")
+  pods          ProofOfDelivery[] @relation("PodUploader")
+
+  @@index([organizationId, role])
+}
+
+model Session {
+  id        String   @id @default(cuid())
+  token     String   @unique
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+}
+
+model DriverProfile {
+  id            String @id @default(cuid())
+  userId        String @unique
+  user          User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  phone         String
+  licenseNumber String
+  availability  String @default("AVAILABLE") // AVAILABLE | ON_ROUTE | OFF_DUTY
+  maxActiveJobs Int    @default(3)
+}
+
+model Vehicle {
+  id                 String       @id @default(cuid())
+  organizationId     String
+  organization       Organization @relation(fields: [organizationId], references: [id])
+  registrationNumber String
+  type               String // VAN | BOX_TRUCK | MOTORCYCLE | CAR | REFRIGERATED
+  capacity           String? // human readable, e.g. "3.5 t / 12 m³"
+  status             String       @default("ACTIVE") // ACTIVE | MAINTENANCE | INACTIVE
+  notes              String?
+  createdAt          DateTime     @default(now())
+  updatedAt          DateTime     @updatedAt
+
+  assignments Assignment[]
+
+  @@unique([organizationId, registrationNumber])
+  @@index([organizationId, status])
+}
+
+model Delivery {
+  id              String       @id @default(cuid())
+  organizationId  String
+  organization    Organization @relation(fields: [organizationId], references: [id])
+  trackingCode    String       @unique
+  trackingToken   String       @unique
+  trackingEnabled Boolean      @default(true)
+  recipientName   String
+  recipientPhone  String
+  pickupAddress   String
+  deliveryAddress String
+  instructions    String?
+  priority        String       @default("NORMAL") // LOW | NORMAL | HIGH | URGENT
+  status          String       @default("CREATED") // CREATED | ASSIGNED | PICKED_UP | IN_TRANSIT | DELIVERED | FAILED | CANCELLED
+  expectedAt      DateTime?
+  failureReason   String?
+  completedAt     DateTime?
+  createdAt       DateTime     @default(now())
+  updatedAt       DateTime     @updatedAt
+
+  assignments Assignment[]
+  events      DeliveryEvent[]
+  pods        ProofOfDelivery[]
+
+  @@index([organizationId, status])
+  @@index([organizationId, createdAt])
+  @@index([organizationId, expectedAt])
+}
+
+model Assignment {
+  id           String    @id @default(cuid())
+  deliveryId   String
+  delivery     Delivery  @relation(fields: [deliveryId], references: [id])
+  driverId     String
+  driver       User      @relation("DriverAssignments", fields: [driverId], references: [id])
+  vehicleId    String
+  vehicle      Vehicle   @relation(fields: [vehicleId], references: [id])
+  assignedAt   DateTime  @default(now())
+  unassignedAt DateTime?
+  completedAt  DateTime?
+  active       Boolean   @default(true)
+
+  @@index([driverId, active])
+  @@index([vehicleId, active])
+  @@index([deliveryId, active])
+}
+
+// Append-only history — never update or delete rows here.
+model DeliveryEvent {
+  id        String   @id @default(cuid())
+  deliveryId String
+  delivery  Delivery @relation(fields: [deliveryId], references: [id], onDelete: Cascade)
+  actorId   String?
+  actor     User?    @relation("EventActor", fields: [actorId], references: [id])
+  actorName String?
+  eventType String // CREATED | ASSIGNED | UNASSIGNED | PICKED_UP | IN_TRANSIT | DELIVERED | FAILED | NOTE | CANCELLED | TRACKING_UPDATED | OVERRIDE
+  note      String?
+  customerVisible Boolean @default(false)
+  createdAt DateTime @default(now())
+
+  @@index([deliveryId, createdAt])
+}
+
+model ProofOfDelivery {
+  id            String   @id @default(cuid())
+  deliveryId    String
+  delivery      Delivery @relation(fields: [deliveryId], references: [id], onDelete: Cascade)
+  fileKey       String // storage-relative path, file lives on disk — never in DB
+  fileName      String
+  mimeType      String
+  kind          String // SIGNATURE | PHOTO
+  recipientName String
+  capturedAt    DateTime @default(now())
+  uploadedById  String?
+  uploadedBy    User?    @relation("PodUploader", fields: [uploadedById], references: [id])
+
+  @@index([deliveryId])
+}
+
+model Notification {
+  id             String    @id @default(cuid())
+  userId         String
+  user           User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type           String // NEW_ASSIGNMENT | UNASSIGNED | PICKED_UP | IN_TRANSIT | DELIVERED | FAILED | POD_UPLOADED | TRACKING
+  channel        String    @default("IN_APP") // IN_APP | EMAIL
+  title          String
+  body           String
+  recipientEmail String? // used for EMAIL channel (simulated outbox)
+  deliveryId     String?
+  readAt         DateTime?
+  createdAt      DateTime  @default(now())
+
+  @@index([userId, channel, readAt])
+}
+
+model AuditLog {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+  actorId        String?
+  actorName      String?
+  action         String // DELIVERY_CREATED | DRIVER_ASSIGNED | STATUS_OVERRIDE | ...
+  entityType     String
+  entityId       String
+  detail         String? // JSON string
+  createdAt      DateTime     @default(now())
+
+  @@index([organizationId, createdAt])
+}
