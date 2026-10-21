@@ -1,7 +1,7 @@
 import { db } from "@/lib/db";
 import { ApiError, fail, ok, readJson, requireAdmin } from "@/lib/api-helpers";
 import { trackingActionSchema, firstError } from "@/lib/validation";
-import { generateTrackingToken } from "@/lib/delivery";
+import { TX_OPTIONS, generateTrackingToken, lockDelivery } from "@/lib/delivery";
 import { auditData } from "@/lib/notify";
 
 type Params = { params: Promise<{ id: string }> };
@@ -18,20 +18,21 @@ export async function POST(req: Request, { params }: Params) {
     const { action } = parsed.data;
 
     const result = await db.$transaction(async (tx) => {
-      const delivery = await tx.delivery.findFirst({ where: { id, organizationId: user.organizationId } });
-      if (!delivery) throw new ApiError(404, "Delivery not found");
+      await lockDelivery(tx, id, user.organizationId);
 
       let note = "";
+      let data: { trackingToken?: string; trackingEnabled: boolean };
       if (action === "regenerate") {
-        await tx.delivery.update({ where: { id }, data: { trackingToken: generateTrackingToken(), trackingEnabled: true } });
+        data = { trackingToken: generateTrackingToken(), trackingEnabled: true };
         note = "Tracking link regenerated (old link revoked)";
       } else if (action === "revoke") {
-        await tx.delivery.update({ where: { id }, data: { trackingEnabled: false } });
+        data = { trackingEnabled: false };
         note = "Tracking link revoked";
       } else {
-        await tx.delivery.update({ where: { id }, data: { trackingEnabled: true } });
+        data = { trackingEnabled: true };
         note = "Tracking link restored";
       }
+      const updated = await tx.delivery.update({ where: { id }, data });
 
       await tx.deliveryEvent.create({
         data: { deliveryId: id, eventType: "TRACKING_UPDATED", actorId: user.id, actorName: user.name, note, customerVisible: false },
@@ -40,11 +41,11 @@ export async function POST(req: Request, { params }: Params) {
         data: auditData({
           organizationId: user.organizationId, actorId: user.id, actorName: user.name,
           action: `TRACKING_${action.toUpperCase()}`, entityType: "Delivery", entityId: id,
-          detail: { trackingCode: delivery.trackingCode },
+          detail: { trackingCode: updated.trackingCode },
         }),
       });
-      return { trackingToken: action === "regenerate" ? (await tx.delivery.findUniqueOrThrow({ where: { id } })).trackingToken : delivery.trackingToken, trackingEnabled: action === "revoke" ? false : true };
-    });
+      return { trackingToken: updated.trackingToken, trackingEnabled: updated.trackingEnabled };
+    }, TX_OPTIONS);
 
     return ok({ success: true, trackingToken: result.trackingToken, trackingEnabled: result.trackingEnabled });
   } catch (e) {

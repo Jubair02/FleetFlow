@@ -1,7 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { ChevronLeft, ChevronRight, RotateCcw, ScrollText, Search } from "lucide-react";
+import { ChevronLeft, ChevronRight, RefreshCw, RotateCcw, ScrollText, Search } from "lucide-react";
 
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
@@ -145,16 +145,16 @@ export function AuditView() {
     return `/api/audit?${params.toString()}`;
   }, [entityType, action, page]);
 
-  const { data, loading, error } = useApiData<AuditPageData>(url, [page]);
+  // useApiData refetches whenever `url` changes (filters / page) and drops stale responses.
+  const { data, loading, error, reload } = useApiData<AuditPageData>(url);
 
   const items = data?.items ?? [];
-  const pageCount = data?.pageCount ?? 1;
-  const currentPage = data?.page ?? page;
+  const pageCount = Math.max(1, data?.pageCount ?? 1);
   const total = data?.total ?? 0;
 
   const applyFilters = (e: React.FormEvent) => {
     e.preventDefault();
-    setAction(actionInput);
+    setAction(actionInput.trim());
     setPage(1);
   };
 
@@ -212,6 +212,7 @@ export function AuditView() {
                 value={actionInput}
                 onChange={(e) => setActionInput(e.target.value)}
                 placeholder="Filter by action e.g. DRIVER_ASSIGNED"
+                maxLength={100}
                 className="pl-9"
               />
             </div>
@@ -232,9 +233,12 @@ export function AuditView() {
         </form>
       </Card>
 
-      {error && items.length === 0 && !loading ? (
-        <Card className="p-6">
+      {error && !loading ? (
+        <Card className="flex flex-col items-start gap-3 p-6">
           <p className="text-sm text-destructive">Failed to load audit log: {error}</p>
+          <Button variant="outline" size="sm" onClick={reload}>
+            <RefreshCw aria-hidden /> Try again
+          </Button>
         </Card>
       ) : (
         <Card className="overflow-hidden">
@@ -265,10 +269,18 @@ export function AuditView() {
                     <TableCell colSpan={5}>
                       <div className="flex flex-col items-center gap-2 py-12 text-center">
                         <ScrollText className="size-10 text-muted-foreground/50" aria-hidden />
-                        <p className="font-medium">No audit entries match your filters.</p>
-                        <p className="text-sm text-muted-foreground">
-                          Try a different entity type or clear the action filter.
+                        <p className="font-medium">
+                          {page > pageCount ? "No entries on this page." : "No audit entries match your filters."}
                         </p>
+                        {page > pageCount ? (
+                          <Button variant="outline" size="sm" onClick={() => setPage(pageCount)}>
+                            Go to page {pageCount}
+                          </Button>
+                        ) : (
+                          <p className="text-sm text-muted-foreground">
+                            Try a different entity type or clear the action filter.
+                          </p>
+                        )}
                       </div>
                     </TableCell>
                   </TableRow>
@@ -283,7 +295,9 @@ export function AuditView() {
 
       {/* Pagination */}
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <p className="text-sm text-muted-foreground">{total} records</p>
+        <p className="text-sm text-muted-foreground">
+          {total} record{total === 1 ? "" : "s"}
+        </p>
         <div className="flex items-center gap-2">
           <Button
             variant="outline"
@@ -295,13 +309,13 @@ export function AuditView() {
             <ChevronLeft aria-hidden /> Prev
           </Button>
           <span className="text-sm whitespace-nowrap text-muted-foreground">
-            Page {currentPage} of {pageCount}
+            Page {page} of {pageCount}
           </span>
           <Button
             variant="outline"
             size="sm"
             disabled={loading || page >= pageCount}
-            onClick={() => setPage((p) => p + 1)}
+            onClick={() => setPage((p) => Math.min(pageCount, p + 1))}
             className="min-h-11 sm:min-h-9"
           >
             Next <ChevronRight aria-hidden />

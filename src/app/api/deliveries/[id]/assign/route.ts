@@ -1,14 +1,18 @@
+import { Prisma } from "@prisma/client";
 import { db } from "@/lib/db";
 import { ApiError, fail, ok, readJson, requireAdmin } from "@/lib/api-helpers";
 import { assignSchema, firstError } from "@/lib/validation";
-import { auditData, notifyInApp, notifyEmail } from "@/lib/notify";
+import { TX_OPTIONS, lockDelivery, lockDriver, lockVehicle, syncDriverAvailability } from "@/lib/delivery";
+import { auditData, bestEffort, notifyInApp, notifyEmail } from "@/lib/notify";
 
 type Params = { params: Promise<{ id: string }> };
 
 // POST /api/deliveries/[id]/assign — transactional dispatch.
-// Race-safe: the capacity + availability checks run inside the same
-// transaction as the assignment write, and SQLite serializes writers,
-// so two concurrent dispatches cannot both pass the checks.
+// Race-safe at READ COMMITTED: the transaction locks the delivery, then the
+// driver profile, then the vehicle (the global lock order) before running the
+// dispatchable / capacity / vehicle-in-use checks, so two concurrent dispatches
+// of the same delivery, driver or vehicle are serialized and the second one
+// sees the first one's assignment.
 export async function POST(req: Request, { params }: Params) {
   try {
     const user = await requireAdmin();
@@ -20,14 +24,21 @@ export async function POST(req: Request, { params }: Params) {
 
     try {
       const result = await db.$transaction(async (tx) => {
-        // 1) Delivery must exist in this org and be dispatchable
-        const delivery = await tx.delivery.findFirst({ where: { id, organizationId: user.organizationId } });
-        if (!delivery) throw new ApiError(404, "Delivery not found");
+        // 1) Delivery must exist in this org, be dispatchable and not already assigned
+        await lockDelivery(tx, id, user.organizationId);
+        const delivery = await tx.delivery.findUniqueOrThrow({
+          where: { id },
+          include: { assignments: { where: { active: true }, select: { id: true } } },
+        });
         if (!["CREATED", "FAILED"].includes(delivery.status)) {
           throw new ApiError(409, `Delivery is ${delivery.status.toLowerCase().replace("_", " ")} — unassign it first if you want to re-dispatch`);
         }
+        if (delivery.assignments.length) {
+          throw new ApiError(409, "Delivery already has an active assignment — unassign it first");
+        }
 
-        // 2) Driver checks
+        // 2) Driver checks (profile locked → capacity check can't be raced)
+        await lockDriver(tx, driverId);
         const driver = await tx.user.findUnique({
           where: { id: driverId },
           include: { driverProfile: true },
@@ -44,11 +55,20 @@ export async function POST(req: Request, { params }: Params) {
           throw new ApiError(409, `${driver.name} is at capacity (${activeCount}/${driver.driverProfile.maxActiveJobs} active jobs)`);
         }
 
-        // 3) Vehicle checks
+        // 3) Vehicle checks (vehicle locked → in-use check can't be raced)
+        await lockVehicle(tx, vehicleId);
         const vehicle = await tx.vehicle.findFirst({ where: { id: vehicleId, organizationId: user.organizationId } });
         if (!vehicle) throw new ApiError(400, "Vehicle not found in your organization");
         if (vehicle.status !== "ACTIVE") {
           throw new ApiError(400, `Vehicle ${vehicle.registrationNumber} is ${vehicle.status.toLowerCase()} and cannot be dispatched`);
+        }
+        // a driver may carry several jobs in one vehicle, but a vehicle can't be with two drivers
+        const inUse = await tx.assignment.findFirst({
+          where: { vehicleId, active: true, driverId: { not: driverId } },
+          include: { driver: { select: { name: true } } },
+        });
+        if (inUse) {
+          throw new ApiError(409, `Vehicle ${vehicle.registrationNumber} is in use by ${inUse.driver.name}`);
         }
 
         // 4) Create assignment + flip status atomically
@@ -76,36 +96,38 @@ export async function POST(req: Request, { params }: Params) {
             detail: { trackingCode: delivery.trackingCode, driver: driver.name, vehicle: vehicle.registrationNumber },
           }),
         });
-        // auto-set driver availability to ON_ROUTE when they take a job
-        if (driver.driverProfile.availability === "AVAILABLE") {
-          await tx.driverProfile.update({ where: { userId: driverId }, data: { availability: "ON_ROUTE" } });
-        }
+        // driver availability follows their active jobs (AVAILABLE → ON_ROUTE)
+        await syncDriverAvailability(tx, driverId);
         return { delivery, driver, vehicle, assignment };
-      });
+      }, TX_OPTIONS);
 
-      // 5) Notify the driver (in-app + email) — outside the transaction
-      await Promise.all([
-        notifyInApp({
-          userId: driverId,
-          type: "NEW_ASSIGNMENT",
-          title: "New assignment",
-          body: `${result.delivery.trackingCode} — pick up at ${result.delivery.pickupAddress.split(",")[0]}, deliver to ${result.delivery.deliveryAddress.split(",")[0]}.`,
-          deliveryId: result.delivery.id,
-        }),
-        notifyEmail({
-          userId: driverId,
-          recipientEmail: result.driver.email,
-          type: "NEW_ASSIGNMENT",
-          title: `[FleetFlow] New assignment ${result.delivery.trackingCode}`,
-          body: `You have been assigned delivery ${result.delivery.trackingCode}. Open the FleetFlow driver app for details.`,
-          deliveryId: result.delivery.id,
-        }),
-      ]);
+      // 5) Notify the driver (in-app + email) — outside the transaction, best effort
+      await bestEffort("assign: driver notification", () =>
+        Promise.all([
+          notifyInApp({
+            userId: driverId,
+            type: "NEW_ASSIGNMENT",
+            title: "New assignment",
+            body: `${result.delivery.trackingCode} — pick up at ${result.delivery.pickupAddress.split(",")[0]}, deliver to ${result.delivery.deliveryAddress.split(",")[0]}.`,
+            deliveryId: result.delivery.id,
+          }),
+          notifyEmail({
+            organizationId: user.organizationId,
+            userId: driverId,
+            recipientEmail: result.driver.email,
+            dedupeKey: `assigned:${result.assignment.id}:${driverId}`,
+            type: "NEW_ASSIGNMENT",
+            title: `[FleetFlow] New assignment ${result.delivery.trackingCode}`,
+            body: `You have been assigned delivery ${result.delivery.trackingCode}. Open the FleetFlow driver app for details.`,
+            deliveryId: result.delivery.id,
+          }),
+        ])
+      );
 
       return ok({ success: true, assignmentId: result.assignment.id });
     } catch (txError) {
-      // Prisma transaction write conflicts (concurrent dispatch race)
-      if (txError instanceof Error && /busy|conflict|P2034/i.test(txError.message)) {
+      // Serialization/write conflicts are unlikely with row locks, but still map cleanly
+      if (txError instanceof Prisma.PrismaClientKnownRequestError && txError.code === "P2034") {
         throw new ApiError(409, "Concurrent dispatch detected — the assignment was not created. Please retry.");
       }
       throw txError;

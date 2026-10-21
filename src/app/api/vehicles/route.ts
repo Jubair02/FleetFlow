@@ -1,17 +1,31 @@
+import { Prisma } from "@prisma/client";
 import { db } from "@/lib/db";
+import { assertPlanLimit } from "@/lib/plans";
 import { ApiError, fail, ok, readJson, requireAdmin } from "@/lib/api-helpers";
 import { createVehicleSchema, firstError } from "@/lib/validation";
+import { TX_OPTIONS } from "@/lib/delivery";
 import { auditData } from "@/lib/notify";
 
-// GET /api/vehicles — org fleet with active job counts (admin)
+const DUPLICATE_REGISTRATION = "A vehicle with this registration number already exists";
+
+// GET /api/vehicles — org fleet with active job + all-time assignment counts (admin)
 export async function GET() {
   try {
     const user = await requireAdmin();
-    const vehicles = await db.vehicle.findMany({
-      where: { organizationId: user.organizationId },
-      orderBy: { registrationNumber: "asc" },
-      include: { _count: { select: { assignments: { where: { active: true } } } } },
-    });
+    const [vehicles, activeCounts] = await Promise.all([
+      db.vehicle.findMany({
+        where: { organizationId: user.organizationId },
+        orderBy: { registrationNumber: "asc" },
+        include: { _count: { select: { assignments: true } } },
+      }),
+      db.assignment.groupBy({
+        by: ["vehicleId"],
+        where: { active: true, vehicle: { organizationId: user.organizationId } },
+        _count: { _all: true },
+      }),
+    ]);
+    const activeMap = new Map(activeCounts.map((c) => [c.vehicleId, c._count._all]));
+
     return ok({
       items: vehicles.map((v) => ({
         id: v.id,
@@ -20,7 +34,8 @@ export async function GET() {
         capacity: v.capacity || "",
         status: v.status,
         notes: v.notes || "",
-        activeJobs: v._count.assignments,
+        activeJobs: activeMap.get(v.id) ?? 0,
+        assignmentCount: v._count.assignments,
         createdAt: v.createdAt.toISOString(),
       })),
     });
@@ -39,28 +54,39 @@ export async function POST(req: Request) {
 
     const clash = await db.vehicle.findFirst({
       where: { organizationId: user.organizationId, registrationNumber: data.registrationNumber },
+      select: { id: true },
     });
-    if (clash) throw new ApiError(409, "A vehicle with this registration number already exists");
+    if (clash) throw new ApiError(409, DUPLICATE_REGISTRATION);
 
-    const vehicle = await db.$transaction(async (tx) => {
-      const v = await tx.vehicle.create({
-        data: {
-          organizationId: user.organizationId,
-          registrationNumber: data.registrationNumber,
-          type: data.type,
-          capacity: data.capacity || null,
-          notes: data.notes || null,
-        },
-      });
-      await tx.auditLog.create({
-        data: auditData({
-          organizationId: user.organizationId, actorId: user.id, actorName: user.name,
-          action: "VEHICLE_REGISTERED", entityType: "Vehicle", entityId: v.id,
-          detail: { registrationNumber: data.registrationNumber, type: data.type },
-        }),
-      });
-      return v;
-    });
+    let vehicle;
+    try {
+      vehicle = await db.$transaction(async (tx) => {
+        await assertPlanLimit(tx, user.organizationId, "vehicles");
+        const v = await tx.vehicle.create({
+          data: {
+            organizationId: user.organizationId,
+            registrationNumber: data.registrationNumber,
+            type: data.type,
+            capacity: data.capacity || null,
+            notes: data.notes || null,
+          },
+        });
+        await tx.auditLog.create({
+          data: auditData({
+            organizationId: user.organizationId, actorId: user.id, actorName: user.name,
+            action: "VEHICLE_REGISTERED", entityType: "Vehicle", entityId: v.id,
+            detail: { registrationNumber: data.registrationNumber, type: data.type },
+          }),
+        });
+        return v;
+      }, TX_OPTIONS);
+    } catch (e) {
+      // concurrent registration of the same number slipped past the pre-check
+      if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === "P2002") {
+        throw new ApiError(409, DUPLICATE_REGISTRATION);
+      }
+      throw e;
+    }
 
     return ok({ success: true, vehicleId: vehicle.id }, 201);
   } catch (e) {

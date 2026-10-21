@@ -45,17 +45,21 @@ export function truncate(s: string, n: number): string {
 }
 
 export function csvEscape(v: string | number | null | undefined): string {
-  const s = String(v ?? "");
-  return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  let s = String(v ?? "");
+  // Neutralize spreadsheet formulas (CSV injection) in text cells.
+  if (typeof v === "string" && /^[=+\-@\t\r]/.test(s)) s = "'" + s;
+  return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 }
 
 export function downloadCsv(filename: string, rows: (string | number | null | undefined)[][]) {
-  const csv = rows.map((r) => r.map(csvEscape).join(",")).join("\n");
+  const csv = rows.map((r) => r.map(csvEscape).join(",")).join("\r\n");
   const blob = new Blob(["\uFEFF" + csv], { type: "text/csv;charset=utf-8" });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
   a.download = filename;
+  document.body.appendChild(a);
   a.click();
-  URL.revokeObjectURL(url);
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
 }

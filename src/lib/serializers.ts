@@ -16,6 +16,8 @@ export interface AssignmentDTO {
   unassignedAt: string | null;
   completedAt: string | null;
   active: boolean;
+  /** Set when closed: DELIVERED | FAILED | CANCELLED | UNASSIGNED */
+  outcome: string | null;
 }
 
 export interface DeliveryDTO {
@@ -25,6 +27,8 @@ export interface DeliveryDTO {
   trackingEnabled: boolean;
   recipientName: string;
   recipientPhone: string;
+  recipientEmail: string | null;
+  externalRef: string | null;
   pickupAddress: string;
   deliveryAddress: string;
   instructions: string | null;
@@ -61,6 +65,8 @@ export function toDeliveryDTO(d: DeliveryWithRefs, includeToken: boolean): Deliv
     trackingEnabled: d.trackingEnabled,
     recipientName: d.recipientName,
     recipientPhone: d.recipientPhone,
+    recipientEmail: d.recipientEmail,
+    externalRef: d.externalRef,
     pickupAddress: d.pickupAddress,
     deliveryAddress: d.deliveryAddress,
     instructions: d.instructions || null,
@@ -99,6 +105,7 @@ export function toAssignmentDTO(a: Assignment & { driver: User; vehicle: Vehicle
     unassignedAt: a.unassignedAt ? a.unassignedAt.toISOString() : null,
     completedAt: a.completedAt ? a.completedAt.toISOString() : null,
     active: a.active,
+    outcome: a.outcome ?? null,
   };
 }
 

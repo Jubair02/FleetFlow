@@ -1,51 +1,118 @@
 import { db } from "@/lib/db";
-import { fail, ok, requireAdmin } from "@/lib/api-helpers";
-import { isLateDelivery } from "@/lib/delivery";
+import { fail, localDayKey, ok, parseTzOffset, requireAdmin } from "@/lib/api-helpers";
+import { onTimeRateFromCounts, summarizeStatuses } from "@/lib/report-metrics";
 
-// GET /api/dashboard — operations metrics for the admin dashboard
-export async function GET() {
+const DAY_MS = 24 * 60 * 60 * 1000;
+const CHART_DAYS = 14;
+
+// GET /api/dashboard?tz= — operations metrics for the admin dashboard
+// `tz` = viewer's getTimezoneOffset(); the daily chart is keyed by their local date.
+export async function GET(req: Request) {
   try {
     const user = await requireAdmin();
     const orgId = user.organizationId;
-    const DAY = 24 * 60 * 60 * 1000;
-    const since = new Date(Date.now() - 13 * DAY);
-    since.setHours(0, 0, 0, 0);
+    const tz = parseTzOffset(new URL(req.url).searchParams.get("tz"));
 
-    const [deliveries, drivers, vehicles, recentEvents] = await Promise.all([
+    // Last 14 local days, oldest first; window starts at local midnight of the first day.
+    const todayKey = localDayKey(new Date(), tz);
+    const todayStart = Date.parse(`${todayKey}T00:00:00.000Z`) + tz * 60_000;
+    const dayKeys = Array.from({ length: CHART_DAYS }, (_, i) =>
+      new Date(Date.parse(`${todayKey}T00:00:00.000Z`) - (CHART_DAYS - 1 - i) * DAY_MS).toISOString().slice(0, 10)
+    );
+    const windowStart = new Date(todayStart - (CHART_DAYS - 1) * DAY_MS);
+
+    const orgDeliveries = { organizationId: orgId };
+    const urgentPendingWhere = { ...orgDeliveries, status: "CREATED", priority: { in: ["URGENT", "HIGH"] } };
+
+    const [
+      statusCounts,
+      priorityCounts,
+      lateCount,
+      onTimeEligible,
+      deliveredWithoutDeadline,
+      createdInWindow,
+      completedInWindow,
+      failedEventsInWindow,
+      drivers,
+      vehicles,
+      recentEvents,
+      failedList,
+      urgentList,
+      pendingUrgentCount,
+    ] = await Promise.all([
+      db.delivery.groupBy({ by: ["status"], where: orgDeliveries, _count: { _all: true } }),
+      db.delivery.groupBy({ by: ["priority"], where: orgDeliveries, _count: { _all: true } }),
+      // On-time rate (see src/lib/report-metrics.ts): on-time ÷ delivered WITH a deadline.
+      // Deliveries without expectedAt/completedAt are excluded, never counted as on time.
+      db.delivery.count({
+        where: {
+          ...orgDeliveries,
+          status: "DELIVERED",
+          expectedAt: { not: null },
+          completedAt: { not: null, gt: db.delivery.fields.expectedAt },
+        },
+      }),
+      db.delivery.count({
+        where: { ...orgDeliveries, status: "DELIVERED", expectedAt: { not: null }, completedAt: { not: null } },
+      }),
+      db.delivery.count({
+        where: { ...orgDeliveries, status: "DELIVERED", OR: [{ expectedAt: null }, { completedAt: null }] },
+      }),
       db.delivery.findMany({
-        where: { organizationId: orgId },
-        select: { status: true, priority: true, createdAt: true, expectedAt: true, completedAt: true, failureReason: true, trackingCode: true, recipientName: true },
+        where: { ...orgDeliveries, createdAt: { gte: windowStart } },
+        select: { createdAt: true },
+      }),
+      db.delivery.findMany({
+        where: { ...orgDeliveries, status: "DELIVERED", completedAt: { gte: windowStart } },
+        select: { completedAt: true },
+      }),
+      db.deliveryEvent.findMany({
+        where: { eventType: "FAILED", createdAt: { gte: windowStart }, delivery: orgDeliveries },
+        select: { createdAt: true },
       }),
       db.user.findMany({
         where: { organizationId: orgId, role: "DRIVER" },
         include: { driverProfile: true, assignments: { where: { active: true }, select: { id: true } } },
+        orderBy: { name: "asc" },
       }),
-      db.vehicle.findMany({ where: { organizationId: orgId } }),
+      db.vehicle.findMany({ where: { organizationId: orgId }, orderBy: { registrationNumber: "asc" } }),
       db.deliveryEvent.findMany({
-        where: { delivery: { organizationId: orgId } },
-        orderBy: { createdAt: "desc" },
+        where: { delivery: orgDeliveries },
+        orderBy: [{ createdAt: "desc" }, { id: "desc" }],
         take: 12,
         include: { delivery: { select: { trackingCode: true } } },
       }),
+      db.delivery.findMany({
+        where: { ...orgDeliveries, status: "FAILED" },
+        select: { id: true, trackingCode: true, recipientName: true, failureReason: true, createdAt: true },
+        orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+        take: 5,
+      }),
+      db.delivery.findMany({
+        where: urgentPendingWhere,
+        select: { id: true, trackingCode: true, recipientName: true, priority: true, expectedAt: true },
+        orderBy: [{ expectedAt: { sort: "asc", nulls: "last" } }, { createdAt: "asc" }],
+        take: 5,
+      }),
+      db.delivery.count({ where: urgentPendingWhere }),
     ]);
 
-    const byStatus = (s: string) => deliveries.filter((d) => d.status === s).length;
-    const delivered = deliveries.filter((d) => d.status === "DELIVERED");
-    const late = delivered.filter(isLateDelivery);
+    const byStatus = (s: string) => statusCounts.find((c) => c.status === s)?._count._all ?? 0;
+    const counts = summarizeStatuses(statusCounts.map((c) => ({ status: c.status, count: c._count._all })));
 
-    // 14-day daily series
-    const daily: { date: string; total: number; completed: number; failed: number }[] = [];
-    for (let i = 13; i >= 0; i--) {
-      const day = new Date(Date.now() - i * DAY);
-      day.setHours(0, 0, 0, 0);
-      const next = new Date(day.getTime() + DAY);
-      const inDay = deliveries.filter((d) => d.createdAt >= day && d.createdAt < next);
-      daily.push({
-        date: day.toISOString().slice(0, 10),
-        total: inDay.length,
-        completed: inDay.filter((d) => d.status === "DELIVERED").length,
-        failed: inDay.filter((d) => d.status === "FAILED").length,
-      });
+    // 14-day daily series keyed by the viewer's local date
+    const dailyMap = new Map(dayKeys.map((date) => [date, { date, total: 0, completed: 0, failed: 0 }]));
+    for (const d of createdInWindow) {
+      const cur = dailyMap.get(localDayKey(d.createdAt, tz));
+      if (cur) cur.total++;
+    }
+    for (const d of completedInWindow) {
+      const cur = d.completedAt ? dailyMap.get(localDayKey(d.completedAt, tz)) : undefined;
+      if (cur) cur.completed++;
+    }
+    for (const e of failedEventsInWindow) {
+      const cur = dailyMap.get(localDayKey(e.createdAt, tz));
+      if (cur) cur.failed++;
     }
 
     const statusBreakdown = ["CREATED", "ASSIGNED", "PICKED_UP", "IN_TRANSIT", "DELIVERED", "FAILED", "CANCELLED"].map((s) => ({
@@ -55,39 +122,29 @@ export async function GET() {
 
     const priorityBreakdown = ["URGENT", "HIGH", "NORMAL", "LOW"].map((p) => ({
       priority: p,
-      count: deliveries.filter((d) => d.priority === p).length,
+      count: priorityCounts.find((c) => c.priority === p)?._count._all ?? 0,
     }));
 
-    // attention lists
-    const failedIds = await db.delivery.findMany({
-      where: { organizationId: orgId, status: "FAILED" },
-      select: { id: true, trackingCode: true, recipientName: true, failureReason: true, createdAt: true },
-      orderBy: { createdAt: "desc" },
-      take: 5,
-    });
-    const urgentIds = await db.delivery.findMany({
-      where: { organizationId: orgId, status: "CREATED", priority: { in: ["URGENT", "HIGH"] } },
-      select: { id: true, trackingCode: true, recipientName: true, priority: true, expectedAt: true },
-      orderBy: { expectedAt: "asc" },
-      take: 5,
-    });
+    const attentionVehicles = vehicles.filter((v) => v.status !== "ACTIVE");
 
     return ok({
       stats: {
-        total: deliveries.length,
-        pendingAssignment: byStatus("CREATED"),
-        inProgress: byStatus("ASSIGNED") + byStatus("PICKED_UP") + byStatus("IN_TRANSIT"),
-        completed: byStatus("DELIVERED"),
-        failed: byStatus("FAILED"),
-        cancelled: byStatus("CANCELLED"),
+        total: counts.total,
+        pendingAssignment: counts.pendingDispatch,
+        inProgress: counts.inProgress,
+        completed: counts.delivered,
+        failed: counts.failed,
+        cancelled: counts.cancelled,
         activeDrivers: drivers.filter((d) => d.active && d.driverProfile && d.driverProfile.availability !== "OFF_DUTY").length,
         totalDrivers: drivers.length,
-        vehiclesAttention: vehicles.filter((v) => v.status === "MAINTENANCE").length,
+        vehiclesAttention: attentionVehicles.length,
         vehiclesTotal: vehicles.length,
-        onTimeRate: delivered.length ? Math.round(((delivered.length - late.length) / delivered.length) * 100) : null,
-        lateCount: late.length,
+        onTimeRate: onTimeRateFromCounts(lateCount, onTimeEligible),
+        lateCount,
+        onTimeEligible,
+        deliveredWithoutDeadline,
       },
-      daily,
+      daily: Array.from(dailyMap.values()),
       statusBreakdown,
       priorityBreakdown,
       recentEvents: recentEvents.map((e) => ({
@@ -100,11 +157,17 @@ export async function GET() {
         deliveryId: e.deliveryId,
       })),
       attention: {
-        failedDeliveries: failedIds,
-        pendingUrgent: urgentIds,
-        maintenanceVehicles: vehicles
-          .filter((v) => v.status !== "ACTIVE")
-          .map((v) => ({ id: v.id, registrationNumber: v.registrationNumber, type: v.type, status: v.status, notes: v.notes })),
+        failedCount: byStatus("FAILED"),
+        pendingUrgentCount,
+        failedDeliveries: failedList.map((d) => ({ ...d, createdAt: d.createdAt.toISOString() })),
+        pendingUrgent: urgentList.map((d) => ({ ...d, expectedAt: d.expectedAt?.toISOString() ?? null })),
+        maintenanceVehicles: attentionVehicles.map((v) => ({
+          id: v.id,
+          registrationNumber: v.registrationNumber,
+          type: v.type,
+          status: v.status,
+          notes: v.notes,
+        })),
       },
       driverWorkload: drivers
         .filter((d) => d.driverProfile)

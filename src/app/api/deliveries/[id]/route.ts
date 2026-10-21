@@ -1,12 +1,16 @@
+import type { Prisma } from "@prisma/client";
 import { db } from "@/lib/db";
 import { ApiError, fail, ok, readJson, requireUser } from "@/lib/api-helpers";
 import { updateDeliverySchema, firstError } from "@/lib/validation";
+import { driverCanReadDelivery } from "@/lib/constants";
+import { TX_OPTIONS, lockDelivery } from "@/lib/delivery";
 import { auditData } from "@/lib/notify";
 import { toDeliveryDTO, toAssignmentDTO } from "@/lib/serializers";
 
 type Params = { params: Promise<{ id: string }> };
 
-// GET /api/deliveries/[id] — admin, or driver who is/was assigned to it
+// GET /api/deliveries/[id] — admin, or a driver who holds it now, delivered it,
+// or made the latest (failed/cancelled) attempt and it hasn't been reassigned since
 export async function GET(_req: Request, { params }: Params) {
   try {
     const user = await requireUser();
@@ -22,13 +26,13 @@ export async function GET(_req: Request, { params }: Params) {
     });
     if (!delivery) throw new ApiError(404, "Delivery not found");
 
-    if (user.role !== "ADMIN") {
-      const mine = delivery.assignments.some((a) => a.driverId === user.id);
-      if (!mine) throw new ApiError(403, "You are not assigned to this delivery");
+    const isAdmin = user.role === "ADMIN";
+    if (!isAdmin && !driverCanReadDelivery(delivery.assignments, user.id)) {
+      throw new ApiError(403, "You are not assigned to this delivery");
     }
 
     return ok({
-      delivery: toDeliveryDTO({ ...delivery, _count: { pods: delivery.pods.length } }, user.role === "ADMIN"),
+      delivery: toDeliveryDTO({ ...delivery, _count: { pods: delivery.pods.length } }, isAdmin),
       events: delivery.events.map((e) => ({
         id: e.id,
         eventType: e.eventType,
@@ -37,7 +41,8 @@ export async function GET(_req: Request, { params }: Params) {
         customerVisible: e.customerVisible,
         createdAt: e.createdAt.toISOString(),
       })),
-      assignments: delivery.assignments.map(toAssignmentDTO),
+      // drivers only see their own assignment history, never other drivers'
+      assignments: delivery.assignments.filter((a) => isAdmin || a.driverId === user.id).map(toAssignmentDTO),
       pods: delivery.pods.map((p) => ({
         id: p.id,
         kind: p.kind,
@@ -53,47 +58,62 @@ export async function GET(_req: Request, { params }: Params) {
   }
 }
 
-// PATCH /api/deliveries/[id] — edit details (admin)
+// PATCH /api/deliveries/[id] — edit details (admin). Only fields that were
+// sent are written, and only fields that actually changed are audited.
 export async function PATCH(req: Request, { params }: Params) {
   try {
     const user = await requireUser();
     if (user.role !== "ADMIN") throw new ApiError(403, "Admin access required");
     const { id } = await params;
 
-    const delivery = await db.delivery.findFirst({ where: { id, organizationId: user.organizationId } });
-    if (!delivery) throw new ApiError(404, "Delivery not found");
-    if (delivery.status === "DELIVERED" || delivery.status === "CANCELLED") {
-      throw new ApiError(400, "Delivered or cancelled deliveries cannot be edited");
-    }
-
     const parsed = updateDeliverySchema.safeParse(await readJson<unknown>(req));
     if (!parsed.success) throw new ApiError(400, firstError(parsed.error));
     const data = parsed.data;
 
-    const updated = await db.$transaction(async (tx) => {
-      const u = await tx.delivery.update({
-        where: { id },
-        data: {
-          ...(data.recipientName !== undefined ? { recipientName: data.recipientName } : {}),
-          ...(data.recipientPhone !== undefined ? { recipientPhone: data.recipientPhone } : {}),
-          ...(data.pickupAddress !== undefined ? { pickupAddress: data.pickupAddress } : {}),
-          ...(data.deliveryAddress !== undefined ? { deliveryAddress: data.deliveryAddress } : {}),
-          ...(data.instructions !== undefined ? { instructions: data.instructions || null } : {}),
-          ...(data.priority !== undefined ? { priority: data.priority } : {}),
-          ...(data.expectedAt !== undefined ? { expectedAt: data.expectedAt ? new Date(data.expectedAt) : null } : {}),
-        },
-      });
+    // requested values, normalized to their stored form (undefined = not sent)
+    const requested = {
+      recipientName: data.recipientName,
+      recipientPhone: data.recipientPhone,
+      pickupAddress: data.pickupAddress,
+      deliveryAddress: data.deliveryAddress,
+      instructions: data.instructions === undefined ? undefined : data.instructions || null,
+      externalRef: data.externalRef === undefined ? undefined : data.externalRef || null,
+      recipientEmail: data.recipientEmail === undefined ? undefined : data.recipientEmail || null,
+      priority: data.priority,
+      expectedAt: data.expectedAt === undefined ? undefined : data.expectedAt ? new Date(data.expectedAt) : null,
+    };
+
+    await db.$transaction(async (tx) => {
+      await lockDelivery(tx, id, user.organizationId);
+      const delivery = await tx.delivery.findUniqueOrThrow({ where: { id } });
+      if (delivery.status === "DELIVERED" || delivery.status === "CANCELLED") {
+        throw new ApiError(409, "Delivered or cancelled deliveries cannot be edited");
+      }
+
+      const changes: Record<string, string | Date | null> = {};
+      for (const [field, value] of Object.entries(requested)) {
+        if (value === undefined) continue;
+        const current = delivery[field as keyof typeof requested];
+        const same = value instanceof Date || current instanceof Date
+          ? (value as Date | null)?.getTime() === (current as Date | null)?.getTime()
+          : value === current;
+        if (!same) changes[field] = value;
+      }
+      const fields = Object.keys(changes);
+      if (!fields.length) return; // nothing changed — no write, no audit noise
+
+      await tx.delivery.update({ where: { id }, data: changes as Prisma.DeliveryUpdateInput });
       await tx.auditLog.create({
         data: auditData({
           organizationId: user.organizationId, actorId: user.id, actorName: user.name,
-          action: "DELIVERY_UPDATED", entityType: "Delivery", entityId: id, detail: { fields: Object.keys(data) },
+          action: "DELIVERY_UPDATED", entityType: "Delivery", entityId: id,
+          detail: { trackingCode: delivery.trackingCode, fields },
         }),
       });
-      return u;
-    });
+    }, TX_OPTIONS);
 
     const full = await db.delivery.findUniqueOrThrow({
-      where: { id: updated.id },
+      where: { id },
       include: { assignments: { where: { active: true }, include: { driver: true, vehicle: true } }, _count: { select: { pods: true } } },
     });
     return ok({ delivery: toDeliveryDTO(full, true) });
@@ -102,32 +122,33 @@ export async function PATCH(req: Request, { params }: Params) {
   }
 }
 
-// DELETE /api/deliveries/[id] — only unstarted deliveries (admin)
+// DELETE /api/deliveries/[id] — only deliveries that were never assigned (admin)
 export async function DELETE(_req: Request, { params }: Params) {
   try {
     const user = await requireUser();
     if (user.role !== "ADMIN") throw new ApiError(403, "Admin access required");
     const { id } = await params;
 
-    const delivery = await db.delivery.findFirst({
-      where: { id, organizationId: user.organizationId },
-      include: { _count: { select: { assignments: true } } },
-    });
-    if (!delivery) throw new ApiError(404, "Delivery not found");
-    if (delivery.status !== "CREATED" || delivery._count.assignments > 0) {
-      throw new ApiError(400, "Only deliveries that were never assigned can be deleted. Use Cancel instead.");
-    }
+    await db.$transaction(async (tx) => {
+      // lock first so a concurrent dispatch can't slip an assignment in
+      await lockDelivery(tx, id, user.organizationId);
+      const delivery = await tx.delivery.findUniqueOrThrow({
+        where: { id },
+        include: { _count: { select: { assignments: true } } },
+      });
+      if (delivery.status !== "CREATED" || delivery._count.assignments > 0) {
+        throw new ApiError(409, "Only deliveries that were never assigned can be deleted. Use Cancel instead.");
+      }
 
-    await db.$transaction([
-      db.deliveryEvent.deleteMany({ where: { deliveryId: id } }),
-      db.delivery.delete({ where: { id } }),
-      db.auditLog.create({
+      await tx.deliveryEvent.deleteMany({ where: { deliveryId: id } });
+      await tx.delivery.delete({ where: { id } });
+      await tx.auditLog.create({
         data: auditData({
           organizationId: user.organizationId, actorId: user.id, actorName: user.name,
           action: "DELIVERY_DELETED", entityType: "Delivery", entityId: id, detail: { trackingCode: delivery.trackingCode },
         }),
-      }),
-    ]);
+      });
+    }, TX_OPTIONS);
     return ok({ success: true });
   } catch (e) {
     return fail(e);

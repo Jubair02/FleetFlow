@@ -1,5 +1,5 @@
 import { randomBytes } from "crypto";
-import { mkdir, readFile, writeFile } from "fs/promises";
+import { mkdir, readFile, unlink, writeFile } from "fs/promises";
 import path from "path";
 
 // ─────────────────────────────────────────────────────────────
@@ -56,8 +56,17 @@ export async function savePodFile(buffer: Buffer, originalName: string): Promise
   return { fileKey, fileName: originalName.replace(/[^\w.\- ]/g, "_").slice(0, 80) || "proof", mimeType, size: buffer.length };
 }
 
-export async function readPodFile(fileKey: string): Promise<Buffer> {
+function podPath(fileKey: string): string {
   // Prevent path traversal: fileKey must be a bare filename
   if (!/^[\w.\-]+$/.test(fileKey)) throw new Error("Invalid file key");
-  return readFile(path.join(STORAGE_ROOT, fileKey));
+  return path.join(STORAGE_ROOT, fileKey);
+}
+
+export async function readPodFile(fileKey: string): Promise<Buffer> {
+  return readFile(podPath(fileKey));
+}
+
+/** Remove a stored file (e.g. when the DB write that referenced it rolled back). */
+export async function deletePodFile(fileKey: string): Promise<void> {
+  await unlink(podPath(fileKey)).catch(() => {});
 }

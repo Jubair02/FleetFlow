@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { toast } from "sonner";
 import { useAppStore } from "@/store/app-store";
 
 // ─────────────────────────────────────────────────────────────
@@ -33,9 +34,18 @@ export async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> 
   }
   if (!res.ok) {
     const message = (data as { error?: string })?.error || `Request failed (${res.status})`;
+    if (res.status === 401 && !path.startsWith("/api/auth/")) handleSessionExpired();
     throw new ApiRequestError(res.status, message);
   }
   return data as T;
+}
+
+/** Session expired or was revoked (e.g. account deactivated) — back to sign-in. */
+function handleSessionExpired() {
+  const store = useAppStore.getState();
+  if (!store.session) return;
+  store.signOut();
+  toast.error("Your session has ended — please sign in again.");
 }
 
 export const api = {
@@ -48,44 +58,52 @@ export const api = {
 
 /**
  * Fetch data from an API endpoint. Automatically refetches when:
- *  - the global refreshKey bumps (after any mutation elsewhere), or
- *  - deps change.
+ *  - the URL changes, or
+ *  - the global refreshKey bumps (after any mutation elsewhere).
+ * Responses that arrive after a newer request was issued are discarded.
  */
-export function useApiData<T>(url: string | null, deps: unknown[] = []) {
+export function useApiData<T>(url: string | null) {
   const [data, setData] = useState<T | null>(null);
   const [loading, setLoading] = useState<boolean>(!!url);
   const [error, setError] = useState<string | null>(null);
+  const [loadedUrl, setLoadedUrl] = useState<string | null>(null);
   const refreshKey = useAppStore((s) => s.refreshKey);
-  const mounted = useRef(true);
+  const requestId = useRef(0);
 
   useEffect(() => {
-    mounted.current = true;
     return () => {
-      mounted.current = false;
+      requestId.current++; // drop in-flight responses after unmount
     };
   }, []);
 
   const load = useCallback(async () => {
+    const id = ++requestId.current;
     if (!url) {
       setLoading(false);
       return;
     }
     setLoading(true);
-    setError(null);
     try {
       const result = await apiFetch<T>(url);
-      if (mounted.current) setData(result);
+      if (id !== requestId.current) return;
+      setData(result);
+      setError(null);
+      setLoadedUrl(url);
     } catch (e) {
-      if (mounted.current) setError(e instanceof Error ? e.message : "Failed to load");
+      if (id !== requestId.current) return;
+      setError(e instanceof Error ? e.message : "Failed to load");
+      setLoadedUrl(url);
     } finally {
-      if (mounted.current) setLoading(false);
+      if (id === requestId.current) setLoading(false);
     }
-     
-  }, [url, ...deps]);
+  }, [url]);
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- fetch-on-change is this hook's purpose
     load();
   }, [load, refreshKey]);
 
-  return { data, loading, error, reload: load };
+  // Until the current URL has answered, report loading (avoids a one-frame "empty" state).
+  const pending = !!url && loadedUrl !== url;
+  return { data, loading: loading || pending, error: pending ? null : error, reload: load };
 }

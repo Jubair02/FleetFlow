@@ -1,8 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   LayoutDashboard,
   Package,
@@ -19,7 +17,9 @@ import {
   Sun,
   Moon,
   CheckCheck,
-  ExternalLink,
+  Settings,
+  KeyRound,
+  Building2,
 } from "lucide-react";
 import { useTheme } from "next-themes";
 import { toast } from "sonner";
@@ -41,7 +41,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { ScrollArea } from "@/components/ui/scroll-area";
+import { ChangePasswordDialog } from "@/components/fleetflow/change-password-dialog";
 
 const ADMIN_NAV: { section: string; items: { view: AppView; label: string; icon: typeof LayoutDashboard }[] }[] = [
   {
@@ -66,6 +66,10 @@ const ADMIN_NAV: { section: string; items: { view: AppView; label: string; icon:
       { view: "notifications", label: "Notifications", icon: Bell },
       { view: "audit", label: "Audit Log", icon: ScrollText },
     ],
+  },
+  {
+    section: "Company",
+    items: [{ view: "settings", label: "Settings", icon: Settings }],
   },
 ];
 
@@ -92,6 +96,7 @@ const VIEW_TITLES: Record<AppView, string> = {
   reports: "Reports & Analytics",
   notifications: "Notifications",
   audit: "Audit Log",
+  settings: "Settings",
   "driver-jobs": "My Jobs",
   "driver-history": "My History",
 };
@@ -152,22 +157,26 @@ function NavLinks({ onNavigate }: { onNavigate?: () => void }) {
   );
 }
 
-function UserCard({ onNavigate }: { onNavigate?: () => void }) {
-  const session = useAppStore((s) => s.session);
-  const setSession = useAppStore((s) => s.setSession);
+/** Ends the server session, then clears session + navigation state client-side. */
+function useLogout(onDone?: () => void) {
   const [loggingOut, setLoggingOut] = useState(false);
-  if (!session) return null;
-
-  const logout = async () => {
+  const logout = useCallback(async () => {
     setLoggingOut(true);
     try {
       await api.post("/api/auth/logout");
     } catch {
-      /* ignore */
+      /* ignore — sign out locally regardless */
     }
-    setSession(null);
-    onNavigate?.();
-  };
+    useAppStore.getState().signOut();
+    onDone?.();
+  }, [onDone]);
+  return { logout, loggingOut };
+}
+
+function UserCard({ onNavigate }: { onNavigate?: () => void }) {
+  const session = useAppStore((s) => s.session);
+  const { logout, loggingOut } = useLogout(onNavigate);
+  if (!session) return null;
 
   return (
     <div className="flex items-center justify-between gap-2 rounded-xl border bg-card p-3">
@@ -191,8 +200,10 @@ function UserCard({ onNavigate }: { onNavigate?: () => void }) {
 
 function NotificationBell() {
   const setView = useAppStore((s) => s.setView);
+  const bump = useAppStore((s) => s.bump);
   const session = useAppStore((s) => s.session);
-  const { data, reload } = useApiData<{ items: NotificationItem[]; unread: number }>("/api/notifications");
+  const [open, setOpen] = useState(false);
+  const { data, loading, error, reload } = useApiData<{ items: NotificationItem[]; unread: number }>("/api/notifications");
 
   // poll for new notifications every 45s
   useEffect(() => {
@@ -203,17 +214,43 @@ function NotificationBell() {
   const unread = data?.unread ?? 0;
   const items = data?.items ?? [];
 
+  // New notifications (e.g. a fresh assignment) → refresh every mounted view.
+  const prevUnread = useRef<number | null>(null);
+  useEffect(() => {
+    if (!data) return;
+    if (prevUnread.current !== null && data.unread > prevUnread.current) bump();
+    prevUnread.current = data.unread;
+  }, [data, bump]);
+
   const markAllRead = async () => {
     try {
       await api.post("/api/notifications/read", { all: true });
-      reload();
+      bump();
     } catch {
       toast.error("Could not mark notifications as read");
     }
   };
 
+  const openItem = (n: NotificationItem) => {
+    setOpen(false);
+    if (!n.readAt) {
+      api
+        .post("/api/notifications/read", { ids: [n.id] })
+        .then(() => bump())
+        .catch(() => {
+          /* non-critical — it stays unread */
+        });
+    }
+    if (n.deliveryId) {
+      useAppStore.getState().focusDelivery(n.deliveryId);
+      setView(session?.role === "DRIVER" ? "driver-jobs" : "deliveries");
+    } else {
+      setView("notifications");
+    }
+  };
+
   return (
-    <Popover>
+    <Popover open={open} onOpenChange={setOpen}>
       <PopoverTrigger asChild>
         <Button variant="ghost" size="icon" className="relative" aria-label={`Notifications${unread ? ` (${unread} unread)` : ""}`}>
           <Bell className="size-5" />
@@ -233,8 +270,12 @@ function NotificationBell() {
             </Button>
           )}
         </div>
-        <ScrollArea className="max-h-80">
-          {items.length === 0 ? (
+        <div className="max-h-80 overflow-y-auto overscroll-contain">
+          {!data && loading ? (
+            <div className="px-3 py-8 text-center text-sm text-muted-foreground">Loading…</div>
+          ) : !data && error ? (
+            <div className="px-3 py-8 text-center text-sm text-muted-foreground">Couldn&apos;t load notifications.</div>
+          ) : items.length === 0 ? (
             <div className="px-3 py-8 text-center text-sm text-muted-foreground">You&apos;re all caught up.</div>
           ) : (
             <div className="divide-y">
@@ -242,18 +283,11 @@ function NotificationBell() {
                 <button
                   key={n.id}
                   className={cn("flex w-full flex-col gap-0.5 px-3 py-2.5 text-left transition-colors hover:bg-accent/50", !n.readAt && "bg-primary/5")}
-                  onClick={() => {
-                    if (n.deliveryId) {
-                      useAppStore.getState().focusDelivery(n.deliveryId);
-                      setView(session?.role === "DRIVER" ? "driver-jobs" : "deliveries");
-                    } else {
-                      setView("notifications");
-                    }
-                  }}
+                  onClick={() => openItem(n)}
                 >
                   <div className="flex items-center justify-between gap-2">
                     <span className={cn("truncate text-sm", n.readAt ? "font-medium" : "font-semibold")}>{n.title}</span>
-                    {!n.readAt && <span className="size-2 shrink-0 rounded-full bg-primary" />}
+                    {!n.readAt && <span className="size-2 shrink-0 rounded-full bg-primary" role="img" aria-label="Unread" />}
                   </div>
                   <span className="line-clamp-2 text-xs text-muted-foreground">{n.body}</span>
                   <span className="text-[11px] text-muted-foreground/70">{timeAgo(n.createdAt)}</span>
@@ -261,9 +295,17 @@ function NotificationBell() {
               ))}
             </div>
           )}
-        </ScrollArea>
+        </div>
         <div className="border-t p-2">
-          <Button variant="ghost" size="sm" className="w-full text-xs" onClick={() => setView("notifications")}>
+          <Button
+            variant="ghost"
+            size="sm"
+            className="w-full text-xs"
+            onClick={() => {
+              setOpen(false);
+              setView("notifications");
+            }}
+          >
             View all notifications
           </Button>
         </div>
@@ -297,9 +339,10 @@ function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
         <NavLinks onNavigate={onNavigate} />
       </div>
       <div className="flex flex-col gap-3">
-        {session?.role === "ADMIN" && (
-          <div className="rounded-lg border border-dashed px-3 py-2 text-[11px] leading-snug text-muted-foreground">
-            <span className="font-medium text-foreground">Demo org:</span> {session.organizationName}. Multi-tenant isolation is enforced on every API.
+        {session && (
+          <div className="flex items-center gap-2 rounded-lg border px-3 py-2 text-xs text-muted-foreground">
+            <Building2 className="size-3.5 shrink-0" aria-hidden />
+            <span className="truncate font-medium text-foreground">{session.organizationName}</span>
           </div>
         )}
         <UserCard onNavigate={onNavigate} />
@@ -343,7 +386,17 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const view = useAppStore((s) => s.view);
   const session = useAppStore((s) => s.session);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
+  const setView = useAppStore((s) => s.setView);
+  const { logout, loggingOut } = useLogout();
   const isDriver = session?.role === "DRIVER";
+  const [passwordOpen, setPasswordOpen] = useState(false);
+  const [passwordSeq, setPasswordSeq] = useState(0);
+  // A temporary password (set by an admin) must be replaced before using the app.
+  const forcePasswordChange = !!session?.mustChangePassword;
+  const openPasswordDialog = () => {
+    setPasswordSeq((n) => n + 1);
+    setPasswordOpen(true);
+  };
 
   return (
     <div className="flex min-h-screen w-full bg-background">
@@ -391,10 +444,17 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                   </div>
                 </DropdownMenuLabel>
                 <DropdownMenuSeparator />
-                <DropdownMenuItem asChild>
-                  <Link href="/?tour=1" className="cursor-pointer" onClick={(e) => { e.preventDefault(); toast.info("Tip: use the Dispatch Board to assign pending deliveries to drivers."); }}>
-                    <ExternalLink className="mr-2 size-4" /> About this demo
-                  </Link>
+                {session?.role === "ADMIN" && (
+                  <DropdownMenuItem className="cursor-pointer" onSelect={() => setView("settings")}>
+                    <Settings className="mr-2 size-4" /> Company settings
+                  </DropdownMenuItem>
+                )}
+                <DropdownMenuItem className="cursor-pointer" onSelect={openPasswordDialog}>
+                  <KeyRound className="mr-2 size-4" /> Change password
+                </DropdownMenuItem>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem className="cursor-pointer" disabled={loggingOut} onSelect={() => void logout()}>
+                  <LogOut className="mr-2 size-4" /> Sign out
                 </DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
@@ -413,6 +473,14 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
       {/* Driver mobile bottom navigation */}
       {isDriver && <DriverBottomNav />}
+
+      <ChangePasswordDialog
+        key={forcePasswordChange ? "forced" : `pw-${passwordSeq}`}
+        open={forcePasswordChange || passwordOpen}
+        onOpenChange={setPasswordOpen}
+        forced={forcePasswordChange}
+        onSignOut={() => void logout()}
+      />
     </div>
   );
 }

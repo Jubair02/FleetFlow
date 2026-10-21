@@ -178,7 +178,8 @@ function SignaturePad({
   onInkChange: (hasInk: boolean) => void;
 }) {
   const strokesRef = useRef<Array<Array<{ x: number; y: number }>>>([]);
-  const drawingRef = useRef(false);
+  /** Pointer currently drawing — a second finger / palm or non-primary button is ignored. */
+  const pointerIdRef = useRef<number | null>(null);
   const [inked, setInked] = useState(false);
 
   const applyStyle = useCallback((ctx: CanvasRenderingContext2D) => {
@@ -238,13 +239,14 @@ function SignaturePad({
   };
 
   const handlePointerDown = (e: ReactPointerEvent<HTMLCanvasElement>) => {
+    if (!e.isPrimary || e.button !== 0 || pointerIdRef.current !== null) return;
     e.preventDefault();
     try {
       e.currentTarget.setPointerCapture(e.pointerId);
     } catch {
       /* pointer already released */
     }
-    drawingRef.current = true;
+    pointerIdRef.current = e.pointerId;
     const ctx = e.currentTarget.getContext("2d");
     if (!ctx) return;
     applyStyle(ctx);
@@ -256,7 +258,7 @@ function SignaturePad({
   };
 
   const handlePointerMove = (e: ReactPointerEvent<HTMLCanvasElement>) => {
-    if (!drawingRef.current) return;
+    if (pointerIdRef.current !== e.pointerId) return;
     const stroke = strokesRef.current[strokesRef.current.length - 1];
     const ctx = e.currentTarget.getContext("2d");
     if (!stroke || !ctx) return;
@@ -274,13 +276,13 @@ function SignaturePad({
     }
   };
 
-  const endStroke = () => {
-    drawingRef.current = false;
+  const endStroke = (e: ReactPointerEvent<HTMLCanvasElement>) => {
+    if (pointerIdRef.current === e.pointerId) pointerIdRef.current = null;
   };
 
   const clear = () => {
     strokesRef.current = [];
-    drawingRef.current = false;
+    pointerIdRef.current = null;
     const canvas = canvasRef.current;
     const ctx = canvas?.getContext("2d");
     if (canvas && ctx) {
@@ -295,7 +297,7 @@ function SignaturePad({
   return (
     <div className="flex flex-col gap-2">
       <div className="flex items-center justify-between gap-2">
-        <Label>Recipient signature</Label>
+        <Label id="pod-signature-label">Recipient signature</Label>
         <Button type="button" variant="ghost" size="sm" className="h-9 gap-1.5" onClick={clear}>
           <Eraser className="size-3.5" aria-hidden="true" /> Clear
         </Button>
@@ -309,18 +311,48 @@ function SignaturePad({
         onLostPointerCapture={endStroke}
         className="h-44 w-full touch-none cursor-crosshair rounded-lg border bg-white"
         role="img"
-        aria-label="Signature pad — draw the recipient's signature with your finger or a stylus"
+        aria-labelledby="pod-signature-label"
+        aria-describedby="pod-signature-hint"
       />
-      <p className="text-xs text-muted-foreground">Draw with a finger or stylus — a signature or a photo is required.</p>
+      <p id="pod-signature-hint" className="text-xs text-muted-foreground">
+        Draw with a finger or stylus. A signature, a photo, or both are required.
+      </p>
     </div>
   );
 }
 
 // ─────────────────────────────────────────────────────────────
-// POD dialog — complete delivery with signature OR photo proof
+// POD dialog — complete delivery with a signature and/or photo proof
 // ─────────────────────────────────────────────────────────────
 
-function PodDialog({ job, onClose, onCompleted }: { job: MyJob; onClose: () => void; onCompleted: () => void }) {
+/** Client-side cap (the server rejects anything above ~9 MB). */
+const MAX_PHOTO_BYTES = 8 * 1024 * 1024;
+const MAX_RECIPIENT_NAME = 120;
+
+/** Flatten the (transparent) signature canvas onto white and encode it as PNG. */
+function signatureBlob(canvas: HTMLCanvasElement): Promise<Blob | null> {
+  const flat = document.createElement("canvas");
+  flat.width = canvas.width;
+  flat.height = canvas.height;
+  const ctx = flat.getContext("2d");
+  if (!ctx) return Promise.resolve(null);
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(0, 0, flat.width, flat.height);
+  ctx.drawImage(canvas, 0, 0);
+  return new Promise((resolve) => flat.toBlob(resolve, "image/png"));
+}
+
+function PodDialog({
+  job,
+  onClose,
+  onCompleted,
+  onFailed,
+}: {
+  job: MyJob;
+  onClose: () => void;
+  onCompleted: () => void;
+  onFailed: () => void;
+}) {
   const [recipientName, setRecipientName] = useState(job.recipientName);
   const [hasSignature, setHasSignature] = useState(false);
   const [photoFile, setPhotoFile] = useState<File | null>(null);
@@ -329,6 +361,8 @@ function PodDialog({ job, onClose, onCompleted }: { job: MyJob; onClose: () => v
   const [tried, setTried] = useState(false);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const photoUrlRef = useRef<string | null>(null);
+  /** The photo already uploaded (without completing) — skipped when retrying. */
+  const uploadedPhotoRef = useRef<File | null>(null);
 
   useEffect(
     () => () => {
@@ -337,7 +371,12 @@ function PodDialog({ job, onClose, onCompleted }: { job: MyJob; onClose: () => v
     [],
   );
 
-  const pickPhoto = (file: File | null) => {
+  const pickPhoto = (picked: File | null) => {
+    let file = picked;
+    if (file && file.size > MAX_PHOTO_BYTES) {
+      toast.error("That photo is too large (max 8 MB) — retake it or pick a smaller image");
+      file = null;
+    }
     if (photoUrlRef.current) {
       URL.revokeObjectURL(photoUrlRef.current);
       photoUrlRef.current = null;
@@ -366,28 +405,40 @@ function PodDialog({ job, onClose, onCompleted }: { job: MyJob; onClose: () => v
       toast.error("Capture a signature or attach a photo before completing");
       return;
     }
-    setSubmitting(true);
-    try {
+    if (name.length > MAX_RECIPIENT_NAME) {
+      toast.error(`Recipient name must be ${MAX_RECIPIENT_NAME} characters or fewer`);
+      return;
+    }
+    const upload = (file: File, kind: "SIGNATURE" | "PHOTO", complete: boolean) => {
       const form = new FormData();
       form.append("recipientName", name);
-      form.append("complete", "true");
-      if (hasSignature && canvasRef.current) {
-        const canvas = canvasRef.current;
-        const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/png"));
+      form.append("complete", complete ? "true" : "false");
+      form.append("file", file, file.name);
+      form.append("kind", kind);
+      return api.post(`/api/deliveries/${job.id}/pod`, form);
+    };
+    setSubmitting(true);
+    try {
+      const canvas = hasSignature ? canvasRef.current : null;
+      if (canvas) {
+        // Photo first (without completing), then the signature completes the delivery.
+        if (photoFile && uploadedPhotoRef.current !== photoFile) {
+          await upload(photoFile, "PHOTO", false);
+          uploadedPhotoRef.current = photoFile;
+        }
+        const blob = await signatureBlob(canvas);
         if (!blob) throw new Error("Could not read the signature — try again or attach a photo");
-        form.append("file", new File([blob], `${job.trackingCode}-signature.png`, { type: "image/png" }));
-        form.append("kind", "SIGNATURE");
+        await upload(new File([blob], `${job.trackingCode}-signature.png`, { type: "image/png" }), "SIGNATURE", true);
       } else if (photoFile) {
-        form.append("file", photoFile, photoFile.name);
-        form.append("kind", "PHOTO");
+        await upload(photoFile, "PHOTO", true);
       } else {
         throw new Error("No proof captured");
       }
-      await api.post(`/api/deliveries/${job.id}/pod`, form);
       toast.success("Delivery completed — proof recorded");
       onCompleted();
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Could not record proof of delivery");
+      onFailed();
     } finally {
       setSubmitting(false);
     }
@@ -412,6 +463,7 @@ function PodDialog({ job, onClose, onCompleted }: { job: MyJob; onClose: () => v
               onChange={(e) => setRecipientName(e.target.value)}
               placeholder="Who received the package?"
               autoComplete="off"
+              maxLength={MAX_RECIPIENT_NAME}
               className="h-11"
               aria-invalid={nameMissing}
             />
@@ -422,17 +474,18 @@ function PodDialog({ job, onClose, onCompleted }: { job: MyJob; onClose: () => v
 
           <div className="flex items-center gap-3" aria-hidden="true">
             <span className="h-px flex-1 bg-border" />
-            <span className="text-xs uppercase tracking-wide text-muted-foreground">or</span>
+            <span className="text-xs uppercase tracking-wide text-muted-foreground">and / or</span>
             <span className="h-px flex-1 bg-border" />
           </div>
 
           <div className="flex flex-col gap-2">
-            <Label htmlFor="pod-photo">Photo proof (optional alternative)</Label>
+            <Label htmlFor="pod-photo">Photo proof (max 8 MB)</Label>
             <Input
               id="pod-photo"
               key={photoUrl ? "picked" : "empty"}
               type="file"
               accept="image/png,image/jpeg,image/webp"
+              capture="environment"
               onChange={(e) => pickPhoto(e.target.files?.[0] ?? null)}
               className="h-11"
             />
@@ -480,16 +533,33 @@ function PodDialog({ job, onClose, onCompleted }: { job: MyJob; onClose: () => v
 // Report problem dialog — mark a job FAILED with a reason
 // ─────────────────────────────────────────────────────────────
 
-function ReportProblemDialog({ job, onClose, onReported }: { job: MyJob; onClose: () => void; onReported: () => void }) {
+function ReportProblemDialog({
+  job,
+  onClose,
+  onReported,
+  onFailed,
+}: {
+  job: MyJob;
+  onClose: () => void;
+  onReported: () => void;
+  onFailed: () => void;
+}) {
   const [reason, setReason] = useState<string>("");
   const [note, setNote] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [tried, setTried] = useState(false);
 
+  const noteRequired = reason === "OTHER";
+  const noteMissing = tried && noteRequired && !note.trim();
+
   const submit = async () => {
     setTried(true);
     if (!reason) {
       toast.error("Select what went wrong");
+      return;
+    }
+    if (noteRequired && !note.trim()) {
+      toast.error("Add a note describing the problem");
       return;
     }
     setSubmitting(true);
@@ -504,6 +574,7 @@ function ReportProblemDialog({ job, onClose, onReported }: { job: MyJob; onClose
       onReported();
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Could not report the problem");
+      onFailed();
     } finally {
       setSubmitting(false);
     }
@@ -521,9 +592,9 @@ function ReportProblemDialog({ job, onClose, onReported }: { job: MyJob; onClose
 
         <div className="flex flex-col gap-4">
           <div className="flex flex-col gap-2">
-            <Label>What went wrong? *</Label>
+            <Label htmlFor="report-reason">What went wrong? *</Label>
             <Select value={reason} onValueChange={setReason}>
-              <SelectTrigger className="h-11 w-full" aria-label="Failure reason">
+              <SelectTrigger id="report-reason" className="h-11 w-full" aria-invalid={tried && !reason}>
                 <SelectValue placeholder="Select a reason" />
               </SelectTrigger>
               <SelectContent>
@@ -538,14 +609,21 @@ function ReportProblemDialog({ job, onClose, onReported }: { job: MyJob; onClose
           </div>
 
           <div className="flex flex-col gap-2">
-            <Label htmlFor="report-note">Internal note (optional)</Label>
+            <Label htmlFor="report-note">Internal note {noteRequired ? "*" : "(optional)"}</Label>
             <Textarea
               id="report-note"
               rows={3}
+              maxLength={500}
               value={note}
               onChange={(e) => setNote(e.target.value)}
-              placeholder="Anything dispatch should know — visible to your team only."
+              placeholder={
+                noteRequired
+                  ? "Describe what happened — required when the reason is “Other”."
+                  : "Anything dispatch should know — visible to your team only."
+              }
+              aria-invalid={noteMissing}
             />
+            {noteMissing && <p className="text-xs text-rose-600 dark:text-rose-400">Describe the problem so dispatch knows what happened.</p>}
           </div>
 
           <div
@@ -616,10 +694,20 @@ function JobDetailDialog() {
         ) : error && !detail ? (
           <Card className="flex flex-col items-center gap-3 p-6 text-center">
             <AlertTriangle className="size-8 text-amber-500" aria-hidden="true" />
-            <p className="text-sm text-muted-foreground">{error}</p>
-            <Button type="button" variant="outline" className="min-h-11" onClick={reload}>
-              <RefreshCw className="size-4" aria-hidden="true" /> Try again
-            </Button>
+            <div>
+              <p className="font-medium">This job isn&apos;t available</p>
+              <p className="mt-1 text-sm text-muted-foreground">
+                It may have been reassigned to another driver or removed. ({error})
+              </p>
+            </div>
+            <div className="flex flex-wrap justify-center gap-2">
+              <Button type="button" variant="outline" className="min-h-11" onClick={reload}>
+                <RefreshCw className="size-4" aria-hidden="true" /> Try again
+              </Button>
+              <Button type="button" className="min-h-11" onClick={() => focusDelivery(null)}>
+                Close
+              </Button>
+            </div>
           </Card>
         ) : detail && job ? (
           <div className="flex flex-col gap-5">
@@ -667,7 +755,7 @@ function JobDetailDialog() {
                       <img
                         src={`/api/pod/${pod.id}`}
                         alt={`${pod.kind === "PHOTO" ? "Photo" : "Signature"} proof for ${job.trackingCode}`}
-                        className="h-20 w-28 rounded-md border object-cover"
+                        className="h-20 w-28 rounded-md border bg-white object-contain p-1"
                       />
                       <figcaption className="mt-1 text-[11px] leading-snug text-muted-foreground">
                         {pod.kind === "PHOTO" ? "Photo" : "Signature"} · {formatDateTime(pod.capturedAt)}
@@ -754,25 +842,41 @@ function ActiveJobCard({
 // History card (compact)
 // ─────────────────────────────────────────────────────────────
 
+/** How THIS driver's assignment ended — not the delivery's current status (it may have been reassigned since). */
+function jobOutcome(job: MyJob): string {
+  return job.outcome ?? job.status;
+}
+
+function jobEndedAt(job: MyJob): string | null {
+  return job.endedAt ?? job.completedAt ?? null;
+}
+
 function HistoryCard({ job }: { job: MyJob }) {
+  const outcome = jobOutcome(job);
+  const endedAt = jobEndedAt(job);
   return (
     <Card className="p-4">
       <div className="flex flex-wrap items-center gap-2">
         <span className="font-mono text-sm font-semibold">{job.trackingCode}</span>
         <span className="ml-auto flex items-center gap-1.5">
           <PriorityBadge priority={job.priority} />
-          <StatusBadge status={job.status} />
+          <StatusBadge status={outcome} />
         </span>
       </div>
       <div className="mt-2 flex flex-wrap items-baseline gap-x-2 gap-y-0.5 text-sm">
         <span className="font-medium">{job.recipientName}</span>
-        {job.status === "DELIVERED" && job.completedAt ? (
-          <span className="text-muted-foreground">Completed {formatDateTime(job.completedAt)}</span>
+        {outcome === "DELIVERED" ? (
+          <span className="text-muted-foreground">{endedAt ? `Completed ${formatDateTime(endedAt)}` : "Completed"}</span>
         ) : null}
-        {job.status === "FAILED" ? (
-          <span className="text-rose-600 dark:text-rose-400">{failureReasonLabel(job.failureReason)}</span>
+        {outcome === "FAILED" ? (
+          <span className="text-rose-600 dark:text-rose-400">
+            {job.failureReason ? failureReasonLabel(job.failureReason) : "Failed"}
+          </span>
         ) : null}
-        {job.status === "CANCELLED" ? <span className="text-muted-foreground">Cancelled</span> : null}
+        {outcome === "FAILED" && endedAt ? <span className="text-muted-foreground">{formatDateTime(endedAt)}</span> : null}
+        {outcome === "CANCELLED" ? (
+          <span className="text-muted-foreground">{endedAt ? `Cancelled ${formatDateTime(endedAt)}` : "Cancelled"}</span>
+        ) : null}
       </div>
     </Card>
   );
@@ -785,7 +889,8 @@ function HistoryCard({ job }: { job: MyJob }) {
 function DriverPortalView() {
   const view = useAppStore((s) => s.view);
   const setView = useAppStore((s) => s.setView);
-  const [tab, setTab] = useState<"active" | "history">(view === "driver-history" ? "history" : "active");
+  // The tab mirrors the app view, so bottom nav / sidebar / notifications stay in sync.
+  const tab: "active" | "history" = view === "driver-history" ? "history" : "active";
   const [busyId, setBusyId] = useState<string | null>(null);
   const [podJob, setPodJob] = useState<MyJob | null>(null);
   const [reportJob, setReportJob] = useState<MyJob | null>(null);
@@ -793,16 +898,8 @@ function DriverPortalView() {
   const active = useApiData<{ items: MyJob[] }>("/api/my/jobs");
   const history = useApiData<{ items: MyJob[] }>(tab === "history" ? "/api/my/jobs?scope=history" : null);
 
-  // Keep the tab in sync when navigation happens elsewhere (bottom nav, notifications).
-  useEffect(() => {
-    if (view === "driver-jobs") setTab((t) => (t === "active" ? t : "active"));
-    else if (view === "driver-history") setTab((t) => (t === "history" ? t : "history"));
-  }, [view]);
-
   const handleTabChange = (value: string) => {
-    const next: "active" | "history" = value === "history" ? "history" : "active";
-    setTab(next);
-    setView(next === "active" ? "driver-jobs" : "driver-history");
+    setView(value === "history" ? "driver-history" : "driver-jobs");
   };
 
   const transition = async (job: MyJob, status: "PICKED_UP" | "IN_TRANSIT") => {
@@ -810,10 +907,10 @@ function DriverPortalView() {
     try {
       await api.post(`/api/deliveries/${job.id}/status`, { status });
       toast.success(status === "PICKED_UP" ? "Pickup confirmed — package is with you" : "Delivery started — you are on the way");
-      useAppStore.getState().bump();
-      active.reload();
+      useAppStore.getState().bump(); // refetches the job list too
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Could not update the job");
+      active.reload(); // the job may have been cancelled or reassigned meanwhile
     } finally {
       setBusyId(null);
     }
@@ -821,11 +918,13 @@ function DriverPortalView() {
 
   const activeItems = active.data?.items ?? [];
   const historyItems = history.data?.items ?? [];
-  const completedCount = historyItems.filter((j) => j.status === "DELIVERED").length;
-  const failedCount = historyItems.filter((j) => j.status === "FAILED").length;
-  const onTimeCount = historyItems.filter(
-    (j) => j.status === "DELIVERED" && (!j.expectedAt || (j.completedAt && new Date(j.completedAt).getTime() <= new Date(j.expectedAt).getTime())),
-  ).length;
+  const completedCount = historyItems.filter((j) => jobOutcome(j) === "DELIVERED").length;
+  const failedCount = historyItems.filter((j) => jobOutcome(j) === "FAILED").length;
+  const onTimeCount = historyItems.filter((j) => {
+    if (jobOutcome(j) !== "DELIVERED") return false;
+    const endedAt = jobEndedAt(j);
+    return !j.expectedAt || (!!endedAt && new Date(endedAt).getTime() <= new Date(j.expectedAt).getTime());
+  }).length;
 
   return (
     <div className="mx-auto w-full max-w-3xl">
@@ -928,9 +1027,9 @@ function DriverPortalView() {
           onClose={() => setPodJob(null)}
           onCompleted={() => {
             useAppStore.getState().bump();
-            active.reload();
             setPodJob(null);
           }}
+          onFailed={active.reload}
         />
       ) : null}
 
@@ -940,9 +1039,9 @@ function DriverPortalView() {
           onClose={() => setReportJob(null)}
           onReported={() => {
             useAppStore.getState().bump();
-            active.reload();
             setReportJob(null);
           }}
+          onFailed={active.reload}
         />
       ) : null}
 

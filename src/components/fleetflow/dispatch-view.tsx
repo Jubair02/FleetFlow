@@ -7,6 +7,7 @@ import {
   CheckCircle2,
   Clock,
   Loader2,
+  RotateCcw,
   Truck,
   UserCheck,
   UserX,
@@ -14,7 +15,7 @@ import {
 } from "lucide-react";
 
 import { api, useApiData } from "@/lib/api-client";
-import { useAppStore } from "@/store/app-store";
+import { goToDelivery, useAppStore } from "@/store/app-store";
 import type { AssignmentHistoryItem, Delivery, DispatchData } from "@/lib/types";
 import { failureReasonLabel } from "@/lib/constants";
 import {
@@ -26,6 +27,7 @@ import {
 } from "@/components/fleetflow/badges";
 import { friendlyDueDate, initials, timeAgo } from "@/lib/format";
 import { AssignDialog } from "@/components/fleetflow/assign-dialog";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -61,10 +63,26 @@ import { cn } from "@/lib/utils";
 
 type ActiveAssignment = AssignmentHistoryItem & { delivery: Delivery };
 
-export function DispatchView() {
-  const { data, loading, error } = useApiData<DispatchData>("/api/dispatch");
+/** Tracking code that opens the delivery's detail in the Deliveries view. */
+function TrackingLink({ delivery }: { delivery: Delivery }) {
+  return (
+    <button
+      type="button"
+      onClick={() => goToDelivery(delivery.id)}
+      className="rounded-sm font-mono text-sm font-medium hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60"
+      aria-label={`Open delivery ${delivery.trackingCode}`}
+    >
+      {delivery.trackingCode}
+    </button>
+  );
+}
 
+export function DispatchView() {
+  const { data, loading, error, reload } = useApiData<DispatchData>("/api/dispatch");
+
+  // Target is kept while the dialog animates closed; `assignOpen` drives visibility.
   const [assignTarget, setAssignTarget] = useState<Delivery | null>(null);
+  const [assignOpen, setAssignOpen] = useState(false);
   const [unassignTarget, setUnassignTarget] = useState<ActiveAssignment | null>(null);
   const [unassignReason, setUnassignReason] = useState("");
   const [busy, setBusy] = useState(false);
@@ -110,19 +128,50 @@ export function DispatchView() {
     );
   }
 
-  if (error) {
+  if (error && !data) {
     return (
-      <Card className="border-destructive/40 p-4 text-sm text-destructive">
-        Couldn&apos;t load the dispatch board: {error}
-      </Card>
+      <Alert variant="destructive">
+        <AlertTriangle className="size-4" />
+        <AlertTitle>Couldn&apos;t load the dispatch board</AlertTitle>
+        <AlertDescription>
+          <p>{error}</p>
+          <Button variant="outline" size="sm" className="mt-2 min-h-11 sm:min-h-9" onClick={() => void reload()}>
+            <RotateCcw /> Retry
+          </Button>
+        </AlertDescription>
+      </Alert>
     );
   }
 
   const now = Date.now();
   const isOverdue = (d: Delivery) => !!d.expectedAt && new Date(d.expectedAt).getTime() < now;
 
+  function openAssign(d: Delivery) {
+    setAssignTarget(d);
+    setAssignOpen(true);
+  }
+
   return (
     <div className="space-y-4">
+      {error ? (
+        <Alert variant="destructive">
+          <AlertTriangle className="size-4" />
+          <AlertTitle>Couldn&apos;t refresh the dispatch board — showing the last loaded data</AlertTitle>
+          <AlertDescription>
+            <p>{error}</p>
+            <Button
+              variant="outline"
+              size="sm"
+              className="mt-2 min-h-11 sm:min-h-9"
+              disabled={loading}
+              onClick={() => void reload()}
+            >
+              {loading ? <Loader2 className="animate-spin" /> : <RotateCcw />} Retry
+            </Button>
+          </AlertDescription>
+        </Alert>
+      ) : null}
+
       {/* Stat chips */}
       <div className="flex flex-wrap gap-3">
         <Card className="flex min-w-40 flex-1 flex-row items-center gap-3 border-amber-200 bg-amber-50/70 p-4 sm:flex-none dark:border-amber-900 dark:bg-amber-950/20">
@@ -188,7 +237,9 @@ export function DispatchView() {
                 <TableBody>
                   {unassigned.map((d) => (
                     <TableRow key={d.id} className="hover:bg-accent/50">
-                      <TableCell className="px-4 py-3 font-mono text-sm font-medium">{d.trackingCode}</TableCell>
+                      <TableCell className="px-4 py-3">
+                        <TrackingLink delivery={d} />
+                      </TableCell>
                       <TableCell className="px-4 py-3">
                         <div className="font-medium">{d.recipientName}</div>
                         {d.status === "FAILED" ? (
@@ -210,7 +261,12 @@ export function DispatchView() {
                         ) : null}
                       </TableCell>
                       <TableCell className="px-4 py-3 text-right">
-                        <Button size="sm" className="min-h-11" onClick={() => setAssignTarget(d)}>
+                        <Button
+                          size="sm"
+                          className="min-h-11"
+                          onClick={() => openAssign(d)}
+                          aria-label={`Assign ${d.trackingCode}`}
+                        >
                           <UserCheck /> Assign
                         </Button>
                       </TableCell>
@@ -225,7 +281,7 @@ export function DispatchView() {
               {unassigned.map((d) => (
                 <div key={d.id} className="space-y-2 rounded-lg border p-4">
                   <div className="flex items-center justify-between gap-2">
-                    <span className="font-mono text-sm font-medium">{d.trackingCode}</span>
+                    <TrackingLink delivery={d} />
                     <StatusBadge status={d.status} />
                   </div>
                   <p className="font-medium">{d.recipientName}</p>
@@ -241,7 +297,12 @@ export function DispatchView() {
                       <span className="font-medium text-rose-600 dark:text-rose-400">Overdue</span>
                     ) : null}
                   </div>
-                  <Button size="sm" className="min-h-11 self-start" onClick={() => setAssignTarget(d)}>
+                  <Button
+                    size="sm"
+                    className="min-h-11 self-start"
+                    onClick={() => openAssign(d)}
+                    aria-label={`Assign ${d.trackingCode}`}
+                  >
                     <UserCheck /> Assign
                   </Button>
                 </div>
@@ -281,7 +342,7 @@ export function DispatchView() {
                   {assignments.map((a) => (
                     <TableRow key={a.id} className="hover:bg-accent/50">
                       <TableCell className="px-4 py-3">
-                        <div className="font-mono text-sm font-medium">{a.delivery.trackingCode}</div>
+                        <TrackingLink delivery={a.delivery} />
                         <div className="text-xs text-muted-foreground">{a.delivery.recipientName}</div>
                       </TableCell>
                       <TableCell className="px-4 py-3">
@@ -309,6 +370,7 @@ export function DispatchView() {
                           variant="outline"
                           size="sm"
                           className="min-h-11"
+                          aria-label={`Unassign ${a.driverName} from ${a.delivery.trackingCode}`}
                           onClick={() => {
                             setUnassignTarget(a);
                             setUnassignReason("");
@@ -328,7 +390,7 @@ export function DispatchView() {
               {assignments.map((a) => (
                 <div key={a.id} className="space-y-2 rounded-lg border p-4">
                   <div className="flex items-center justify-between gap-2">
-                    <span className="font-mono text-sm font-medium">{a.delivery.trackingCode}</span>
+                    <TrackingLink delivery={a.delivery} />
                     <StatusBadge status={a.delivery.status} />
                   </div>
                   <p className="text-sm text-muted-foreground">{a.delivery.recipientName}</p>
@@ -349,6 +411,7 @@ export function DispatchView() {
                     variant="outline"
                     size="sm"
                     className="min-h-11 self-start"
+                    aria-label={`Unassign ${a.driverName} from ${a.delivery.trackingCode}`}
                     onClick={() => {
                       setUnassignTarget(a);
                       setUnassignReason("");
@@ -399,7 +462,8 @@ export function DispatchView() {
                       </div>
                       <div className="mt-2 flex items-center gap-2">
                         <Progress
-                          value={(dr.activeJobs / Math.max(1, dr.maxActiveJobs)) * 100}
+                          value={Math.min(100, (dr.activeJobs / Math.max(1, dr.maxActiveJobs)) * 100)}
+                          aria-label={`${dr.name}: ${dr.activeJobs} of ${dr.maxActiveJobs} active jobs`}
                           className={cn(
                             "h-1.5 flex-1",
                             offDuty && "[&_[data-slot=progress-indicator]]:bg-rose-500",
@@ -444,6 +508,7 @@ export function DispatchView() {
                       <VehicleStatusBadge status={v.status} />
                       <span className="text-xs tabular-nums text-muted-foreground">
                         {v.activeJobs} active
+                        {v.currentDriverName ? ` · ${v.currentDriverName}` : ""}
                       </span>
                     </div>
                   </div>
@@ -455,13 +520,7 @@ export function DispatchView() {
       </Card>
 
       {/* Assign dialog (opened from queue rows) */}
-      <AssignDialog
-        delivery={assignTarget}
-        open={!!assignTarget}
-        onOpenChange={(o) => {
-          if (!o) setAssignTarget(null);
-        }}
-      />
+      <AssignDialog delivery={assignTarget} open={assignOpen} onOpenChange={setAssignOpen} />
 
       {/* Unassign dialog */}
       <AlertDialog
@@ -488,6 +547,7 @@ export function DispatchView() {
               id="dispatch-unassign-reason"
               value={unassignReason}
               onChange={(e) => setUnassignReason(e.target.value)}
+              maxLength={300}
               placeholder="e.g. Vehicle breakdown, driver shift ended"
             />
           </div>

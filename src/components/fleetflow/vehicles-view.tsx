@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import { toast } from "sonner";
 import {
   Bike,
@@ -10,6 +10,7 @@ import {
   MoreHorizontal,
   Pencil,
   Plus,
+  RefreshCw,
   RotateCcw,
   Snowflake,
   Trash2,
@@ -81,11 +82,12 @@ const TYPE_ICONS: Record<string, LucideIcon> = {
   REFRIGERATED: Snowflake,
 };
 
-const STATUS_TOAST: Record<string, string> = {
-  MAINTENANCE: "sent to maintenance",
-  ACTIVE: "returned to service",
-  INACTIVE: "deactivated",
-};
+function statusToast(from: string, to: string): string {
+  if (to === "MAINTENANCE") return "sent to maintenance";
+  if (to === "INACTIVE") return "deactivated";
+  if (to === "ACTIVE") return from === "INACTIVE" ? "reactivated" : "returned to service";
+  return "updated";
+}
 
 const DESTRUCTIVE_ACTION_CLASSES =
   "bg-rose-600 text-white hover:bg-rose-700 focus-visible:ring-rose-500/30 dark:bg-rose-600 dark:hover:bg-rose-700";
@@ -116,6 +118,7 @@ const EMPTY_VEHICLE_FORM: VehicleFormState = {
   notes: "",
 };
 
+/** Remounted (via `key`) every time it opens, so the form starts from the vehicle being edited. */
 function VehicleFormDialog({
   open,
   vehicle,
@@ -127,24 +130,17 @@ function VehicleFormDialog({
   onOpenChange: (open: boolean) => void;
   onSaved: () => void;
 }) {
-  const [form, setForm] = useState<VehicleFormState>(EMPTY_VEHICLE_FORM);
+  const [form, setForm] = useState<VehicleFormState>(() =>
+    vehicle
+      ? {
+          registrationNumber: vehicle.registrationNumber,
+          type: vehicle.type,
+          capacity: vehicle.capacity ?? "",
+          notes: vehicle.notes ?? "",
+        }
+      : EMPTY_VEHICLE_FORM,
+  );
   const [submitting, setSubmitting] = useState(false);
-
-  useEffect(() => {
-    if (open) {
-      setForm(
-        vehicle
-          ? {
-              registrationNumber: vehicle.registrationNumber,
-              type: vehicle.type,
-              capacity: vehicle.capacity ?? "",
-              notes: vehicle.notes ?? "",
-            }
-          : EMPTY_VEHICLE_FORM,
-      );
-      setSubmitting(false);
-    }
-  }, [open, vehicle]);
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -178,8 +174,8 @@ function VehicleFormDialog({
   };
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-md" aria-describedby={undefined}>
+    <Dialog open={open} onOpenChange={(o) => !submitting && onOpenChange(o)}>
+      <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-md" aria-describedby={undefined}>
         <DialogHeader>
           <DialogTitle>{vehicle ? "Edit vehicle" : "Register vehicle"}</DialogTitle>
           <DialogDescription>
@@ -309,13 +305,18 @@ function VehicleActions({
             <RotateCcw aria-hidden /> Return to service
           </DropdownMenuItem>
         )}
-        {vehicle.status === "ACTIVE" && (
+        {vehicle.status === "INACTIVE" && (
+          <DropdownMenuItem onClick={() => onStatus(vehicle, "ACTIVE")}>
+            <RotateCcw aria-hidden /> Reactivate
+          </DropdownMenuItem>
+        )}
+        {(vehicle.status === "ACTIVE" || vehicle.status === "MAINTENANCE") && (
           <DropdownMenuItem onClick={() => onStatus(vehicle, "INACTIVE")}>
             <CircleOff aria-hidden /> Deactivate
           </DropdownMenuItem>
         )}
         <DropdownMenuSeparator />
-        {vehicle.activeJobs === 0 ? (
+        {vehicle.assignmentCount === 0 ? (
           <DropdownMenuItem variant="destructive" onClick={() => onDelete(vehicle)}>
             <Trash2 aria-hidden /> Delete
           </DropdownMenuItem>
@@ -324,8 +325,10 @@ function VehicleActions({
             <span className="flex items-center gap-2">
               <Trash2 aria-hidden /> Delete
             </span>
-            <span className="pl-6 text-xs font-normal text-muted-foreground">
-              Blocked — {vehicle.activeJobs} active job{vehicle.activeJobs === 1 ? "" : "s"}
+            <span className="pl-6 text-xs font-normal whitespace-normal text-muted-foreground">
+              {vehicle.activeJobs > 0
+                ? `Blocked — ${vehicle.activeJobs} active job${vehicle.activeJobs === 1 ? "" : "s"}`
+                : "Has delivery history — deactivate it instead"}
             </span>
           </DropdownMenuItem>
         )}
@@ -339,6 +342,8 @@ function VehicleActions({
 export function VehiclesView() {
   const { data, loading, error, reload } = useApiData<{ items: VehicleItem[] }>("/api/vehicles");
   const [formOpen, setFormOpen] = useState(false);
+  /** Bumped on every open so the form dialog remounts with fresh state. */
+  const [formSeq, setFormSeq] = useState(0);
   const [editing, setEditing] = useState<VehicleItem | null>(null);
   const [deleting, setDeleting] = useState<VehicleItem | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
@@ -354,27 +359,26 @@ export function VehiclesView() {
   }, [vehicles]);
 
   const openRegister = () => {
+    setFormSeq((n) => n + 1);
     setEditing(null);
     setFormOpen(true);
   };
 
   const openEdit = (vehicle: VehicleItem) => {
+    setFormSeq((n) => n + 1);
     setEditing(vehicle);
     setFormOpen(true);
   };
 
-  const closeForm = () => {
-    setFormOpen(false);
-    setEditing(null);
-  };
+  // Keep `editing` through the close animation; the next open remounts the dialog.
+  const closeForm = () => setFormOpen(false);
 
   const changeStatus = async (vehicle: VehicleItem, status: VehicleStatusAction) => {
     setBusyId(vehicle.id);
     try {
       await api.patch(`/api/vehicles/${vehicle.id}`, { status });
-      toast.success(`${vehicle.registrationNumber} ${STATUS_TOAST[status] ?? "updated"}`);
-      useAppStore.getState().bump();
-      reload();
+      toast.success(`${vehicle.registrationNumber} ${statusToast(vehicle.status, status)}`);
+      useAppStore.getState().bump(); // also refetches this list
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Failed to update vehicle");
     } finally {
@@ -387,8 +391,7 @@ export function VehiclesView() {
     try {
       await api.del(`/api/vehicles/${vehicle.id}`);
       toast.success(`${vehicle.registrationNumber} deleted`);
-      useAppStore.getState().bump();
-      reload();
+      useAppStore.getState().bump(); // also refetches this list
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Failed to delete vehicle");
     } finally {
@@ -428,8 +431,11 @@ export function VehiclesView() {
           </div>
         </Card>
       ) : error && !data ? (
-        <Card className="p-6">
+        <Card className="flex flex-col items-start gap-3 p-6">
           <p className="text-sm text-destructive">Failed to load vehicles: {error}</p>
+          <Button variant="outline" size="sm" onClick={reload}>
+            <RefreshCw aria-hidden /> Try again
+          </Button>
         </Card>
       ) : vehicles.length === 0 ? (
         <Card className="p-10 text-center">
@@ -503,14 +509,14 @@ export function VehiclesView() {
                         </span>
                       </TableCell>
                       <TableCell className="max-w-[240px]">
-                        <div className="space-y-0.5">
-                          <p className="truncate text-sm text-muted-foreground">{v.notes || "—"}</p>
-                          {v.status === "MAINTENANCE" && v.notes && (
-                            <p className="whitespace-normal text-xs text-amber-700 dark:text-amber-400">
-                              {v.notes}
-                            </p>
-                          )}
-                        </div>
+                        {v.status === "MAINTENANCE" && v.notes ? (
+                          // Maintenance notes matter — show them in full, highlighted.
+                          <p className="whitespace-normal text-xs text-amber-700 dark:text-amber-400">{v.notes}</p>
+                        ) : (
+                          <p className="truncate text-sm text-muted-foreground" title={v.notes || undefined}>
+                            {v.notes || "—"}
+                          </p>
+                        )}
                       </TableCell>
                       <TableCell className="text-right">
                         <VehicleActions vehicle={v} busy={busyId === v.id} {...actionsProps} />
@@ -540,7 +546,15 @@ export function VehiclesView() {
                     <VehicleStatusBadge status={v.status} />
                   </div>
                   {v.notes && (
-                    <p className="whitespace-normal text-sm text-muted-foreground">{v.notes}</p>
+                    <p
+                      className={
+                        v.status === "MAINTENANCE"
+                          ? "whitespace-normal text-sm text-amber-700 dark:text-amber-400"
+                          : "whitespace-normal text-sm text-muted-foreground"
+                      }
+                    >
+                      {v.notes}
+                    </p>
                   )}
                   <div className="flex items-center justify-between gap-2 border-t pt-3">
                     <p className="text-xs text-muted-foreground">
@@ -559,13 +573,11 @@ export function VehiclesView() {
       )}
 
       <VehicleFormDialog
+        key={formSeq}
         open={formOpen}
         vehicle={editing}
         onOpenChange={(o) => (o ? setFormOpen(true) : closeForm())}
-        onSaved={() => {
-          closeForm();
-          reload();
-        }}
+        onSaved={closeForm}
       />
 
       <AlertDialog open={deleting !== null} onOpenChange={(o) => !o && setDeleting(null)}>
@@ -573,8 +585,7 @@ export function VehiclesView() {
           <AlertDialogHeader>
             <AlertDialogTitle>Delete {deleting?.registrationNumber}?</AlertDialogTitle>
             <AlertDialogDescription>
-              This cannot be undone. Vehicles with assignment history can&rsquo;t be deleted — set
-              them inactive instead.
+              This permanently removes the vehicle from your fleet and cannot be undone.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>

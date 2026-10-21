@@ -1,6 +1,9 @@
 import { db } from "@/lib/db";
-import { fail, ok, requireAdmin } from "@/lib/api-helpers";
+import { ApiError, fail, ok, requireAdmin } from "@/lib/api-helpers";
 import type { Prisma } from "@prisma/client";
+
+const PAGE_SIZE = 30;
+const MAX_PAGE = 10_000;
 
 // GET /api/audit?page=&entityType=&action= — org audit trail (admin)
 export async function GET(req: Request) {
@@ -8,20 +11,27 @@ export async function GET(req: Request) {
     const user = await requireAdmin();
     const url = new URL(req.url);
     const q = (k: string) => url.searchParams.get(k)?.trim() || "";
-    const page = Math.max(1, parseInt(q("page") || "1", 10) || 1);
-    const pageSize = 30;
+
+    const rawPage = q("page") || "1";
+    if (!/^\d{1,6}$/.test(rawPage)) throw new ApiError(400, "page must be a positive integer");
+    const page = Number(rawPage);
+    if (page < 1 || page > MAX_PAGE) throw new ApiError(400, `page must be between 1 and ${MAX_PAGE}`);
+
+    const entityType = q("entityType");
+    const action = q("action");
+    if (entityType.length > 64 || action.length > 100) throw new ApiError(400, "Filter value is too long");
 
     const where: Prisma.AuditLogWhereInput = { organizationId: user.organizationId };
-    if (q("entityType")) where.entityType = q("entityType");
-    if (q("action")) where.action = { contains: q("action") };
+    if (entityType) where.entityType = entityType;
+    if (action) where.action = { contains: action, mode: "insensitive" };
 
     const [total, items] = await Promise.all([
       db.auditLog.count({ where }),
       db.auditLog.findMany({
         where,
-        orderBy: { createdAt: "desc" },
-        skip: (page - 1) * pageSize,
-        take: pageSize,
+        orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+        skip: (page - 1) * PAGE_SIZE,
+        take: PAGE_SIZE,
       }),
     ]);
 
@@ -37,7 +47,7 @@ export async function GET(req: Request) {
       })),
       total,
       page,
-      pageCount: Math.max(1, Math.ceil(total / pageSize)),
+      pageCount: Math.max(1, Math.ceil(total / PAGE_SIZE)),
     });
   } catch (e) {
     return fail(e);

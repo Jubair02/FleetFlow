@@ -1,20 +1,30 @@
+import { z } from "zod";
 import { db } from "@/lib/db";
-import { fail, ok, readJson, requireUser } from "@/lib/api-helpers";
+import { ApiError, fail, ok, readJson, requireUser } from "@/lib/api-helpers";
+import { firstError } from "@/lib/validation";
 
-// POST /api/notifications/read — mark notifications as read
+// { all: true } marks everything read; { ids: [...] } marks specific notifications.
+const markReadSchema = z.object({
+  ids: z.array(z.string().min(1).max(64)).max(200, "Too many notifications at once").optional(),
+  all: z.boolean().optional(),
+});
+
+// POST /api/notifications/read — mark the current user's in-app notifications as read
 export async function POST(req: Request) {
   try {
     const user = await requireUser();
-    const body = await readJson<{ ids?: string[]; all?: boolean }>(req).catch(() => ({}) as { ids?: string[]; all?: boolean });
+    const parsed = markReadSchema.safeParse(await readJson<unknown>(req));
+    if (!parsed.success) throw new ApiError(400, firstError(parsed.error));
+    const { ids, all } = parsed.data;
 
-    if (body.all) {
+    if (all) {
       await db.notification.updateMany({
         where: { userId: user.id, channel: "IN_APP", readAt: null },
         data: { readAt: new Date() },
       });
-    } else if (Array.isArray(body.ids) && body.ids.length) {
+    } else if (ids?.length) {
       await db.notification.updateMany({
-        where: { userId: user.id, channel: "IN_APP", id: { in: body.ids }, readAt: null },
+        where: { userId: user.id, channel: "IN_APP", id: { in: ids }, readAt: null },
         data: { readAt: new Date() },
       });
     }

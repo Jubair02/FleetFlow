@@ -1,7 +1,7 @@
 "use client";
 
 import { Fragment, useEffect, useState, type ReactNode } from "react";
-import { AlertTriangle, Check, Clock, Link2Off, Loader2, MapPin, RefreshCw, SearchX, Truck, User, X } from "lucide-react";
+import { AlertTriangle, Ban, Check, Clock, Link2Off, Loader2, MapPin, RefreshCw, SearchX, Truck, User, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { apiFetch, ApiRequestError } from "@/lib/api-client";
 import { PUBLIC_STATUS_LABELS } from "@/lib/constants";
@@ -62,6 +62,8 @@ function eventDotColor(eventType: string): string {
 
 function Stepper({ data }: { data: TrackingData }) {
   const failed = data.status === "FAILED";
+  // A cancelled delivery is not "in progress" anywhere — no current/pulsing step.
+  const cancelled = data.status === "CANCELLED";
 
   // Where the delivery currently sits on the 5-step journey.
   let current: number;
@@ -82,10 +84,10 @@ function Stepper({ data }: { data: TrackingData }) {
   }
 
   return (
-    <div className="flex items-start" aria-label="Delivery progress">
+    <div className="flex items-start" role="group" aria-label="Delivery progress">
       {STEPS.map((step, i) => {
-        const completed = i < current;
-        const isCurrent = i === current;
+        const completed = cancelled ? i <= current : i < current;
+        const isCurrent = !cancelled && i === current;
         const failedHere = failed && isCurrent;
         const first = i === 0;
         const last = i === STEPS.length - 1;
@@ -93,7 +95,7 @@ function Stepper({ data }: { data: TrackingData }) {
           <Fragment key={step.status}>
             {i > 0 ? (
               <span
-                className={cn("mt-[17px] h-0.5 min-w-2 flex-1 rounded-full", i <= current ? "bg-emerald-500" : "bg-border")}
+                className={cn("mt-[17px] h-0.5 min-w-2 flex-1 rounded-full", completed || isCurrent ? "bg-emerald-500" : "bg-border")}
                 aria-hidden="true"
               />
             ) : null}
@@ -147,6 +149,7 @@ function Stepper({ data }: { data: TrackingData }) {
 
 function TrackingReady({ data }: { data: TrackingData }) {
   const failed = data.status === "FAILED";
+  const cancelled = data.status === "CANCELLED";
   const statusLabel = PUBLIC_STATUS_LABELS[data.status as keyof typeof PUBLIC_STATUS_LABELS] ?? data.status;
   const events = data.timeline.slice().reverse(); // newest first
 
@@ -173,7 +176,10 @@ function TrackingReady({ data }: { data: TrackingData }) {
           <div className="flex items-start gap-2.5 text-sm">
             <Clock className="mt-0.5 size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
             <span>
-              Expected delivery: <span className="font-medium">{friendlyDueDate(data.expectedAt)}</span>
+              Expected delivery:{" "}
+              <span className={cn("font-medium", cancelled && "line-through text-muted-foreground")}>
+                {friendlyDueDate(data.expectedAt)}
+              </span>
             </span>
           </div>
         </div>
@@ -182,6 +188,18 @@ function TrackingReady({ data }: { data: TrackingData }) {
           <div className="mt-5 rounded-lg border border-amber-200 bg-amber-50 p-3.5 text-sm text-amber-800 dark:border-amber-900/60 dark:bg-amber-950/40 dark:text-amber-200" role="status">
             Delivery attempt unsuccessful{data.failureReason ? ` — ${data.failureReason}` : ""}. The sender has been notified and
             will contact you to reschedule.
+          </div>
+        ) : null}
+
+        {cancelled ? (
+          <div
+            className="mt-5 flex items-start gap-2.5 rounded-lg border border-zinc-200 bg-zinc-50 p-3.5 text-sm text-zinc-700 dark:border-zinc-700 dark:bg-zinc-800/50 dark:text-zinc-300"
+            role="status"
+          >
+            <Ban className="mt-0.5 size-4 shrink-0" aria-hidden="true" />
+            <span>
+              This delivery has been cancelled and will not be delivered. Contact the sender if you have any questions.
+            </span>
           </div>
         ) : null}
 
@@ -262,6 +280,22 @@ export function TrackingView({ token }: { token: string }) {
     };
   }, [token, attempt]);
 
+  // Name the browser tab after the shipment once it has loaded.
+  const loadedCode = state.phase === "ready" ? state.data.trackingCode : null;
+  useEffect(() => {
+    if (!loadedCode) return;
+    const previous = document.title;
+    document.title = `Tracking ${loadedCode} — FleetFlow`;
+    return () => {
+      document.title = previous;
+    };
+  }, [loadedCode]);
+
+  const retry = () => {
+    setState({ phase: "loading" });
+    setAttempt((a) => a + 1);
+  };
+
   return (
     <div className="flex min-h-screen flex-col bg-muted/30">
       <header className="border-b bg-card">
@@ -294,7 +328,7 @@ export function TrackingView({ token }: { token: string }) {
           <StatusCard icon={<AlertTriangle className="size-7 text-amber-500" aria-hidden="true" />} title="Something went wrong">
             {state.message}
             <span className="mt-4 block">
-              <Button variant="outline" className="min-h-11" onClick={() => setAttempt((a) => a + 1)}>
+              <Button variant="outline" className="min-h-11" onClick={retry}>
                 <RefreshCw className="size-4" aria-hidden="true" /> Try again
               </Button>
             </span>

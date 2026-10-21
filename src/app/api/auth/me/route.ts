@@ -1,6 +1,7 @@
 import { db } from "@/lib/db";
 import { getSessionUser } from "@/lib/auth";
 import { fail, ok } from "@/lib/api-helpers";
+import { sessionUserDto } from "@/lib/account";
 
 export async function GET() {
   try {
@@ -12,15 +13,7 @@ export async function GET() {
     });
 
     return ok({
-      user: {
-        id: user.id,
-        name: user.name,
-        email: user.email,
-        role: user.role,
-        organizationId: user.organizationId,
-        organizationName: user.organization.name,
-        driverProfile: user.driverProfile,
-      },
+      user: sessionUserDto(user),
       unreadNotifications: unread,
     });
   } catch (e) {

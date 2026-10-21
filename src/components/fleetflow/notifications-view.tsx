@@ -9,13 +9,18 @@ import {
   CheckCircle2,
   ChevronRight,
   Image as ImageIcon,
+  Info,
   Mail,
   PackageCheck,
+  RefreshCw,
+  RotateCw,
+  Send,
   Truck,
   UserX,
   type LucideIcon,
 } from "lucide-react";
 
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -80,16 +85,31 @@ const DEFAULT_META: NotificationMeta = {
 
 // ── in-app list ──────────────────────────────────────────────
 
+function LoadError({ what, error, onRetry }: { what: string; error: string; onRetry: () => void }) {
+  return (
+    <Card className="flex flex-col items-start gap-3 p-6">
+      <p className="text-sm text-destructive">
+        Failed to load {what}: {error}
+      </p>
+      <Button variant="outline" size="sm" onClick={onRetry}>
+        <RefreshCw aria-hidden /> Try again
+      </Button>
+    </Card>
+  );
+}
+
 function InAppList({
   items,
   loading,
   error,
   onOpen,
+  onRetry,
 }: {
   items: NotificationItem[];
   loading: boolean;
   error: string | null;
   onOpen: (n: NotificationItem) => void;
+  onRetry: () => void;
 }) {
   if (loading && items.length === 0 && !error) {
     return (
@@ -102,11 +122,7 @@ function InAppList({
   }
 
   if (error && items.length === 0) {
-    return (
-      <Card className="p-6">
-        <p className="text-sm text-destructive">Failed to load notifications: {error}</p>
-      </Card>
-    );
+    return <LoadError what="notifications" error={error} onRetry={onRetry} />;
   }
 
   if (items.length === 0) {
@@ -134,7 +150,7 @@ function InAppList({
             onClick={() => onOpen(n)}
             className={cn(
               "flex min-h-11 w-full items-start gap-3 p-4 text-left transition-colors focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset focus-visible:outline-none",
-              n.deliveryId ? "cursor-pointer hover:bg-muted/50" : "cursor-default",
+              n.deliveryId || unread ? "cursor-pointer hover:bg-muted/50" : "cursor-default",
               unread && "bg-primary/5",
             )}
           >
@@ -171,7 +187,112 @@ function InAppList({
 
 // ── email outbox ─────────────────────────────────────────────
 
-function EmailOutbox({ items, loading }: { items: NotificationItem[]; loading: boolean }) {
+type EmailRowStatus = "PENDING" | "SENDING" | "SENT" | "FAILED" | "SIMULATED";
+
+interface EmailOutboxItem extends NotificationItem {
+  status: EmailRowStatus;
+  attempts: number;
+  sentAt: string | null;
+  lastError: string | null;
+}
+
+interface EmailStatusInfo {
+  provider: "resend" | "console";
+  configured: boolean;
+  from: string | null;
+  warning: string | null;
+}
+
+interface EmailOutboxResponse {
+  items: EmailOutboxItem[];
+  emailStatus: EmailStatusInfo;
+  maxAttempts: number;
+  failedRetryable: number;
+}
+
+interface RetryResponse {
+  attempted: number;
+  sent: number;
+  simulated: number;
+  failed: number;
+  skipped: number;
+}
+
+const EMAIL_STATUS_META: Record<EmailRowStatus, { label: string; className: string }> = {
+  PENDING: {
+    label: "Pending",
+    className: "bg-zinc-100 text-zinc-700 dark:bg-zinc-800/60 dark:text-zinc-300",
+  },
+  SENDING: {
+    label: "Sending",
+    className: "bg-cyan-100 text-cyan-700 dark:bg-cyan-950/60 dark:text-cyan-300",
+  },
+  SENT: {
+    label: "Sent",
+    className: "bg-emerald-100 text-emerald-700 dark:bg-emerald-950/60 dark:text-emerald-300",
+  },
+  FAILED: {
+    label: "Failed",
+    className: "bg-rose-100 text-rose-700 dark:bg-rose-950/60 dark:text-rose-300",
+  },
+  SIMULATED: {
+    label: "Simulated",
+    className: "bg-amber-100 text-amber-700 dark:bg-amber-950/60 dark:text-amber-300",
+  },
+};
+
+function EmailModeBanner({ status }: { status: EmailStatusInfo | null }) {
+  if (!status) return null;
+  if (status.provider === "resend") {
+    return (
+      <Alert role="status">
+        <Send aria-hidden />
+        <AlertTitle>Sending real email via Resend</AlertTitle>
+        <AlertDescription>
+          {status.from
+            ? `Emails are sent from an address at ${status.from}.`
+            : "Emails are sent from the configured sender."}
+        </AlertDescription>
+      </Alert>
+    );
+  }
+  return (
+    <Alert role="status">
+      <Info aria-hidden />
+      <AlertTitle>Emails are simulated</AlertTitle>
+      <AlertDescription>
+        {status.warning && <p className="text-amber-700 dark:text-amber-400">{status.warning}</p>}
+        <p>
+          Nothing leaves the server — messages are only recorded here. To send for real, set
+          EMAIL_PROVIDER=resend with RESEND_API_KEY and EMAIL_FROM (on a domain verified in
+          Resend), then restart the app.
+        </p>
+      </AlertDescription>
+    </Alert>
+  );
+}
+
+function EmailOutbox({
+  items,
+  maxAttempts,
+  loading,
+  error,
+  retrying,
+  onRetry,
+  onRetryEmail,
+}: {
+  items: EmailOutboxItem[];
+  maxAttempts: number;
+  loading: boolean;
+  error: string | null;
+  retrying: string | null;
+  onRetry: () => void;
+  onRetryEmail: (id: string) => void;
+}) {
+  if (error && items.length === 0) {
+    return <LoadError what="the email outbox" error={error} onRetry={onRetry} />;
+  }
+
   if (loading && items.length === 0) {
     return (
       <Card className="p-6" aria-busy="true">
@@ -203,24 +324,47 @@ function EmailOutbox({ items, loading }: { items: NotificationItem[]; loading: b
           <TableRow className="bg-muted/50">
             <TableHead>To</TableHead>
             <TableHead>Subject</TableHead>
-            <TableHead>Body</TableHead>
-            <TableHead>Sent</TableHead>
+            <TableHead>Status</TableHead>
+            <TableHead>Created</TableHead>
             <TableHead>Type</TableHead>
+            <TableHead className="text-right">
+              <span className="sr-only">Actions</span>
+            </TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
           {items.map((n) => {
             const meta = NOTIF_META[n.type] ?? DEFAULT_META;
+            const st = EMAIL_STATUS_META[n.status] ?? EMAIL_STATUS_META.PENDING;
+            const canRetry = n.status === "FAILED" && n.attempts < maxAttempts;
             return (
               <TableRow key={n.id}>
                 <TableCell className="font-mono text-xs whitespace-nowrap">
                   {n.recipientEmail ?? "—"}
                 </TableCell>
-                <TableCell className="max-w-[200px]">
-                  <p className="truncate font-medium">{n.title}</p>
-                </TableCell>
                 <TableCell className="max-w-[260px]">
+                  <p className="truncate font-medium">{n.title}</p>
                   <p className="truncate text-sm text-muted-foreground">{n.body}</p>
+                </TableCell>
+                <TableCell className="max-w-[220px]">
+                  <Badge variant="outline" className={cn("text-xs whitespace-nowrap", st.className)}>
+                    {st.label}
+                  </Badge>
+                  {n.status === "FAILED" && (
+                    <>
+                      {n.lastError && (
+                        <p className="mt-1 line-clamp-2 text-xs text-destructive" title={n.lastError}>
+                          {n.lastError}
+                        </p>
+                      )}
+                      <p className="mt-0.5 text-xs text-muted-foreground">
+                        {n.attempts}/{maxAttempts} attempts{!canRetry && " — no retries left"}
+                      </p>
+                    </>
+                  )}
+                  {n.status === "SENT" && n.sentAt && (
+                    <p className="mt-1 text-xs text-muted-foreground">{timeAgo(n.sentAt)}</p>
+                  )}
                 </TableCell>
                 <TableCell className="whitespace-nowrap">
                   <p className="text-sm">{formatDateTime(n.createdAt)}</p>
@@ -234,6 +378,19 @@ function EmailOutbox({ items, loading }: { items: NotificationItem[]; loading: b
                     {n.type}
                   </Badge>
                 </TableCell>
+                <TableCell className="text-right">
+                  {canRetry && (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={retrying !== null}
+                      onClick={() => onRetryEmail(n.id)}
+                      aria-label={`Retry email to ${n.recipientEmail ?? "recipient"}`}
+                    >
+                      <RotateCw className={cn(retrying === n.id && "animate-spin")} aria-hidden /> Retry
+                    </Button>
+                  )}
+                </TableCell>
               </TableRow>
             );
           })}
@@ -243,6 +400,16 @@ function EmailOutbox({ items, loading }: { items: NotificationItem[]; loading: b
   );
 }
 
+function retryMessage(r: RetryResponse): string {
+  if (r.attempted === 0) return "Nothing to retry — already handled or out of attempts";
+  const parts: string[] = [];
+  if (r.sent) parts.push(`${r.sent} sent`);
+  if (r.simulated) parts.push(`${r.simulated} simulated`);
+  if (r.failed) parts.push(`${r.failed} failed again`);
+  if (r.skipped) parts.push(`${r.skipped} skipped`);
+  return `Retried ${r.attempted} email${r.attempted === 1 ? "" : "s"}: ${parts.join(", ") || "done"}`;
+}
+
 // ── main view ────────────────────────────────────────────────
 
 export function NotificationsView() {
@@ -250,20 +417,39 @@ export function NotificationsView() {
   const isAdmin = session?.role === "ADMIN";
 
   const inApp = useApiData<{ items: NotificationItem[]; unread: number }>("/api/notifications");
-  const email = useApiData<{ items: NotificationItem[] }>(
+  const email = useApiData<EmailOutboxResponse>(
     isAdmin ? "/api/notifications?channel=EMAIL" : null,
   );
   const [markingAll, setMarkingAll] = useState(false);
+  // id of the email being retried, "all" for retry-all, null when idle
+  const [retrying, setRetrying] = useState<string | null>(null);
+
+  const retryEmails = async (target: string) => {
+    setRetrying(target);
+    try {
+      const r = await api.post<RetryResponse>(
+        "/api/notifications/retry",
+        target === "all" ? { allFailed: true } : { ids: [target] },
+      );
+      if (r.failed > 0) toast.error(retryMessage(r));
+      else toast.success(retryMessage(r));
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to retry emails");
+    } finally {
+      setRetrying(null);
+      email.reload();
+    }
+  };
 
   const unread = inApp.data?.unread ?? 0;
+  const failedRetryable = email.data?.failedRetryable ?? 0;
 
   const markAllRead = async () => {
     setMarkingAll(true);
     try {
       await api.post("/api/notifications/read", { all: true });
       toast.success("All notifications marked as read");
-      useAppStore.getState().bump();
-      inApp.reload();
+      useAppStore.getState().bump(); // refreshes this list and the header bell
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Failed to mark notifications");
     } finally {
@@ -271,14 +457,17 @@ export function NotificationsView() {
     }
   };
 
-  const openNotification = async (n: NotificationItem) => {
-    if (!n.deliveryId) return;
-    try {
-      await api.post("/api/notifications/read", { ids: [n.id] });
-      useAppStore.getState().bump();
-    } catch {
-      // Navigation should still work even if marking read fails.
+  const openNotification = (n: NotificationItem) => {
+    if (!n.readAt) {
+      // Fire-and-forget: navigation must not wait on (or fail with) marking read.
+      api
+        .post("/api/notifications/read", { ids: [n.id] })
+        .then(() => useAppStore.getState().bump())
+        .catch(() => {
+          /* stays unread — non-critical */
+        });
     }
+    if (!n.deliveryId) return;
     const store = useAppStore.getState();
     if (store.session?.role === "ADMIN") {
       goToDelivery(n.deliveryId);
@@ -312,7 +501,8 @@ export function NotificationsView() {
       items={inApp.data?.items ?? []}
       loading={inApp.loading}
       error={inApp.error}
-      onOpen={(n) => void openNotification(n)}
+      onOpen={openNotification}
+      onRetry={inApp.reload}
     />
   );
 
@@ -345,11 +535,32 @@ export function NotificationsView() {
         </TabsList>
         <TabsContent value="in-app">{inAppList}</TabsContent>
         <TabsContent value="email" className="space-y-3">
-          <p className="text-sm text-muted-foreground">
-            Email delivery is simulated in this demo — outbound messages are captured here. Plug in
-            a provider (Resend/SendGrid/SES) to send for real.
-          </p>
-          <EmailOutbox items={email.data?.items ?? []} loading={email.loading} />
+          <EmailModeBanner status={email.data?.emailStatus ?? null} />
+          {failedRetryable > 0 && (
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <p className="text-sm text-muted-foreground">
+                {failedRetryable} failed email{failedRetryable === 1 ? "" : "s"} can be retried.
+              </p>
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={retrying !== null}
+                onClick={() => void retryEmails("all")}
+              >
+                <RotateCw className={cn(retrying === "all" && "animate-spin")} aria-hidden /> Retry all
+                failed
+              </Button>
+            </div>
+          )}
+          <EmailOutbox
+            items={email.data?.items ?? []}
+            maxAttempts={email.data?.maxAttempts ?? 3}
+            loading={email.loading}
+            error={email.error}
+            retrying={retrying}
+            onRetry={email.reload}
+            onRetryEmail={(id) => void retryEmails(id)}
+          />
         </TabsContent>
       </Tabs>
     </div>

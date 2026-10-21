@@ -1,11 +1,14 @@
 import { db } from "@/lib/db";
 import { ApiError, fail, ok, readJson, requireAdmin } from "@/lib/api-helpers";
 import { unassignSchema, firstError } from "@/lib/validation";
-import { auditData, notifyInApp } from "@/lib/notify";
+import { TX_OPTIONS, closeAssignment, lockDelivery } from "@/lib/delivery";
+import { auditData, bestEffort, notifyInApp } from "@/lib/notify";
 
 type Params = { params: Promise<{ id: string }> };
 
-// POST /api/deliveries/[id]/unassign — release an active assignment (admin)
+// POST /api/deliveries/[id]/unassign — release an active assignment (admin).
+// The delivery is locked first, so the assignment closed here is the one
+// that is actually active right now (outcome UNASSIGNED).
 export async function POST(req: Request, { params }: Params) {
   try {
     const user = await requireAdmin();
@@ -16,21 +19,18 @@ export async function POST(req: Request, { params }: Params) {
     const reason = parsed.data.reason || "Released by dispatcher";
 
     const result = await db.$transaction(async (tx) => {
-      const delivery = await tx.delivery.findFirst({
-        where: { id, organizationId: user.organizationId },
+      await lockDelivery(tx, id, user.organizationId);
+      const delivery = await tx.delivery.findUniqueOrThrow({
+        where: { id },
         include: { assignments: { where: { active: true }, include: { driver: true } } },
       });
-      if (!delivery) throw new ApiError(404, "Delivery not found");
-      if (!delivery.assignments.length) throw new ApiError(400, "Delivery has no active assignment");
       if (["DELIVERED", "CANCELLED"].includes(delivery.status)) {
-        throw new ApiError(400, "Completed deliveries cannot be unassigned");
+        throw new ApiError(409, "Completed deliveries cannot be unassigned");
       }
+      if (!delivery.assignments.length) throw new ApiError(409, "Delivery has no active assignment");
 
       const active = delivery.assignments[0];
-      await tx.assignment.update({
-        where: { id: active.id },
-        data: { active: false, unassignedAt: new Date() },
-      });
+      await closeAssignment(tx, active, "UNASSIGNED");
       await tx.delivery.update({ where: { id: delivery.id }, data: { status: "CREATED" } });
       await tx.deliveryEvent.create({
         data: {
@@ -49,21 +49,18 @@ export async function POST(req: Request, { params }: Params) {
           detail: { trackingCode: delivery.trackingCode, driver: active.driver.name, reason },
         }),
       });
-      // if the driver now has zero active jobs, mark them available again
-      const remaining = await tx.assignment.count({ where: { driverId: active.driverId, active: true } });
-      if (remaining === 0) {
-        await tx.driverProfile.updateMany({ where: { userId: active.driverId, availability: "ON_ROUTE" }, data: { availability: "AVAILABLE" } });
-      }
       return { delivery, driver: active.driver };
-    });
+    }, TX_OPTIONS);
 
-    await notifyInApp({
-      userId: result.driver.id,
-      type: "UNASSIGNED",
-      title: "Assignment removed",
-      body: `${result.delivery.trackingCode} has been reassigned by dispatch.`,
-      deliveryId: result.delivery.id,
-    });
+    await bestEffort("unassign: driver notification", () =>
+      notifyInApp({
+        userId: result.driver.id,
+        type: "UNASSIGNED",
+        title: "Assignment removed",
+        body: `${result.delivery.trackingCode} has been reassigned by dispatch.`,
+        deliveryId: result.delivery.id,
+      })
+    );
 
     return ok({ success: true });
   } catch (e) {

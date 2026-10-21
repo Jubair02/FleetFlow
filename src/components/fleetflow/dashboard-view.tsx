@@ -1,11 +1,12 @@
 "use client";
 
-import { format } from "date-fns";
 import {
   AlertTriangle,
   CheckCircle2,
   Clock,
+  FileUp,
   Link2,
+  PackagePlus,
   Package,
   ShieldAlert,
   StickyNote,
@@ -44,9 +45,12 @@ import { Progress } from "@/components/ui/progress";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useApiData } from "@/lib/api-client";
 import { EVENT_TYPE_LABELS, STATUS_LABELS, failureReasonLabel, type DeliveryStatus } from "@/lib/constants";
-import { friendlyDueDate, timeAgo, truncate } from "@/lib/format";
+import { formatDate, friendlyDueDate, timeAgo, truncate } from "@/lib/format";
 import { cn } from "@/lib/utils";
-import { goToDelivery, useAppStore } from "@/store/app-store";
+import { goToDeliveries, goToDeliveriesAction, goToDelivery, useAppStore } from "@/store/app-store";
+import { Button } from "@/components/ui/button";
+import { OnboardingChecklist } from "@/components/fleetflow/onboarding-checklist";
+import { CHART_TOOLTIP_STYLE, dayTick, dayTooltipLabel } from "@/components/fleetflow/date-range";
 import type { DashboardData } from "@/lib/types";
 
 // ── Constants ────────────────────────────────────────────────
@@ -90,7 +94,7 @@ const EMPTY_DASHBOARD: DashboardData = {
   statusBreakdown: [],
   priorityBreakdown: [],
   recentEvents: [],
-  attention: { failedDeliveries: [], pendingUrgent: [], maintenanceVehicles: [] },
+  attention: { failedCount: 0, pendingUrgentCount: 0, failedDeliveries: [], pendingUrgent: [], maintenanceVehicles: [] },
   driverWorkload: [],
 };
 
@@ -196,16 +200,34 @@ function AttentionRow({
   );
 }
 
-// ── Chart tick/label helpers ─────────────────────────────────
-
-function dayTick(value: unknown): string {
-  const d = new Date(String(value));
-  return Number.isNaN(d.getTime()) ? String(value) : format(d, "d MMM");
-}
-
-function dayTooltipLabel(label: unknown): string {
-  const d = new Date(String(label));
-  return Number.isNaN(d.getTime()) ? String(label) : format(d, "EEE d MMM yyyy");
+/** Shown instead of the charts until the organization has its first delivery. */
+function FirstDeliveryEmptyState() {
+  return (
+    <Card aria-labelledby="first-delivery-heading">
+      <CardContent className="flex flex-col items-center gap-4 py-10 text-center">
+        <div className="flex size-12 items-center justify-center rounded-xl bg-primary/10 text-primary">
+          <PackagePlus className="size-6" aria-hidden="true" />
+        </div>
+        <div className="max-w-md">
+          <h2 id="first-delivery-heading" className="text-base font-semibold">
+            No deliveries yet
+          </h2>
+          <p className="mt-1 text-sm text-muted-foreground">
+            Your charts, on-time rate and driver workload fill in as soon as deliveries start moving. Add one order by hand, or bring
+            in today&apos;s orders from a spreadsheet.
+          </p>
+        </div>
+        <div className="flex flex-wrap justify-center gap-2">
+          <Button onClick={() => goToDeliveriesAction("create")} className="min-h-11 sm:min-h-9">
+            <PackagePlus aria-hidden="true" /> Create your first delivery
+          </Button>
+          <Button variant="outline" onClick={() => goToDeliveriesAction("import")} className="min-h-11 sm:min-h-9">
+            <FileUp aria-hidden="true" /> Import from CSV
+          </Button>
+        </div>
+      </CardContent>
+    </Card>
+  );
 }
 
 function EmptyChart({ height, message }: { height: number; message: string }) {
@@ -220,7 +242,9 @@ function EmptyChart({ height, message }: { height: number; message: string }) {
 
 export function DashboardView() {
   const setView = useAppStore((s) => s.setView);
-  const { data, loading, error } = useApiData<DashboardData>("/api/dashboard");
+  // Daily buckets are keyed by the viewer's local date.
+  const tz = new Date().getTimezoneOffset();
+  const { data, loading, error } = useApiData<DashboardData>(`/api/dashboard?tz=${tz}`);
 
   if (loading && !data) {
     return (
@@ -275,13 +299,18 @@ export function DashboardView() {
     }));
 
   const failedList = d.attention.failedDeliveries.slice(0, 5);
-  const urgentList = d.attention.pendingUrgent;
-  const maintenanceList = d.attention.maintenanceVehicles;
-  const attentionCount =
-    d.attention.failedDeliveries.length + d.attention.pendingUrgent.length + d.attention.maintenanceVehicles.length;
+  const urgentList = d.attention.pendingUrgent.slice(0, 5);
+  const offRoadList = d.attention.maintenanceVehicles;
+  // The lists are capped at 5 rows — badges and descriptions use the true totals.
+  const failedCount = d.attention.failedCount ?? d.attention.failedDeliveries.length;
+  const urgentCount = d.attention.pendingUrgentCount ?? d.attention.pendingUrgent.length;
+  const offRoadCount = offRoadList.length;
+  const attentionCount = failedCount + urgentCount + offRoadCount;
 
   return (
     <div className={cn("flex flex-col gap-6", loading && "opacity-60 transition-opacity")} aria-busy={loading}>
+      <OnboardingChecklist />
+
       {/* KPI cards */}
       <section aria-label="Key metrics" className="grid grid-cols-2 gap-4 md:grid-cols-3 xl:grid-cols-4">
         <KpiCard icon={Package} tone="emerald" label="Total deliveries" value={String(stats.total)} hint="across all statuses" />
@@ -293,7 +322,7 @@ export function DashboardView() {
           hint="awaiting dispatch"
           onClick={() => setView("dispatch")}
         />
-        <KpiCard icon={Truck} tone="teal" label="In progress" value={String(stats.inProgress)} hint="picked up or in transit" />
+        <KpiCard icon={Truck} tone="teal" label="In progress" value={String(stats.inProgress)} hint="assigned, picked up or in transit" />
         <KpiCard icon={CheckCircle2} tone="emerald" label="Completed" value={String(stats.completed)} hint="successfully delivered" />
         <KpiCard
           icon={AlertTriangle}
@@ -301,7 +330,7 @@ export function DashboardView() {
           label="Failed"
           value={String(stats.failed)}
           hint="need reassignment"
-          onClick={() => setView("deliveries")}
+          onClick={() => goToDeliveries("FAILED")}
         />
         <KpiCard
           icon={Users}
@@ -313,7 +342,7 @@ export function DashboardView() {
         <KpiCard
           icon={Wrench}
           tone="amber"
-          label="Vehicles attention"
+          label="Vehicles off the road"
           value={`${stats.vehiclesAttention} / ${stats.vehiclesTotal}`}
           hint="maintenance or inactive"
         />
@@ -322,105 +351,114 @@ export function DashboardView() {
           tone="emerald"
           label="On-time rate"
           value={stats.onTimeRate == null ? "—" : `${stats.onTimeRate}%`}
-          hint="of completed deliveries"
+          hint="of delivered with a deadline"
         />
       </section>
 
-      {/* Charts */}
-      <section aria-label="Charts" className="grid gap-4 lg:grid-cols-3">
-        <Card className="lg:col-span-2">
-          <CardHeader>
-            <CardTitle className="text-base">Deliveries — last 14 days</CardTitle>
-            <CardDescription className="text-xs">Completed, failed and total volume per day</CardDescription>
-          </CardHeader>
-          <CardContent>
-            {d.daily.length === 0 ? (
-              <EmptyChart height={260} message="No delivery activity in the last 14 days." />
-            ) : (
-              <ResponsiveContainer width="100%" height={260}>
-                <ComposedChart data={d.daily} margin={{ top: 4, right: 4, left: -18, bottom: 0 }}>
-                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="rgba(113,113,122,0.2)" />
-                  <XAxis
-                    dataKey="date"
-                    tickLine={false}
-                    axisLine={false}
-                    tickMargin={8}
-                    minTickGap={20}
-                    tick={{ fontSize: 12, fill: "currentColor" }}
-                    className="text-muted-foreground"
-                    tickFormatter={dayTick}
-                  />
-                  <YAxis
-                    tickLine={false}
-                    axisLine={false}
-                    width={38}
-                    allowDecimals={false}
-                    tick={{ fontSize: 12, fill: "currentColor" }}
-                    className="text-muted-foreground"
-                  />
-                  <Tooltip
-                    cursor={{ fill: "rgba(0,0,0,0.04)" }}
-                    contentStyle={{ borderRadius: 8, fontSize: 12 }}
-                    labelFormatter={dayTooltipLabel}
-                  />
-                  <Legend iconType="circle" iconSize={8} wrapperStyle={{ fontSize: 12 }} />
-                  <Bar dataKey="completed" name="Completed" fill={COLORS.emerald} radius={[4, 4, 0, 0]} maxBarSize={18} />
-                  <Bar dataKey="failed" name="Failed" fill={COLORS.rose} radius={[4, 4, 0, 0]} maxBarSize={18} />
-                  <Line dataKey="total" name="Total" stroke={COLORS.zinc} strokeWidth={2} dot={false} />
-                </ComposedChart>
-              </ResponsiveContainer>
-            )}
-          </CardContent>
-        </Card>
+      {/* Charts — replaced by a getting-started prompt until the first delivery exists */}
+      {stats.total === 0 ? (
+        <FirstDeliveryEmptyState />
+      ) : (
+        <section aria-label="Charts" className="grid gap-4 lg:grid-cols-3">
+          <Card className="lg:col-span-2">
+            <CardHeader>
+              <CardTitle className="text-base">Deliveries — last 14 days</CardTitle>
+              <CardDescription className="text-xs">Completed, failed and total volume per day</CardDescription>
+            </CardHeader>
+            <CardContent>
+              {d.daily.length === 0 ? (
+                <EmptyChart height={260} message="No delivery activity in the last 14 days." />
+              ) : (
+                <ResponsiveContainer width="100%" height={260}>
+                  <ComposedChart data={d.daily} margin={{ top: 4, right: 4, left: -18, bottom: 0 }}>
+                    <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="rgba(113,113,122,0.2)" />
+                    <XAxis
+                      dataKey="date"
+                      tickLine={false}
+                      axisLine={false}
+                      tickMargin={8}
+                      minTickGap={20}
+                      tick={{ fontSize: 12, fill: "currentColor" }}
+                      className="text-muted-foreground"
+                      tickFormatter={dayTick}
+                    />
+                    <YAxis
+                      tickLine={false}
+                      axisLine={false}
+                      width={38}
+                      allowDecimals={false}
+                      tick={{ fontSize: 12, fill: "currentColor" }}
+                      className="text-muted-foreground"
+                    />
+                    <Tooltip
+                      cursor={{ fill: "rgba(0,0,0,0.04)" }}
+                      contentStyle={CHART_TOOLTIP_STYLE.contentStyle}
+                      labelStyle={CHART_TOOLTIP_STYLE.labelStyle}
+                      labelFormatter={dayTooltipLabel}
+                    />
+                    <Legend iconType="circle" iconSize={8} wrapperStyle={{ fontSize: 12 }} />
+                    <Bar dataKey="completed" name="Completed" fill={COLORS.emerald} radius={[4, 4, 0, 0]} maxBarSize={18} />
+                    <Bar dataKey="failed" name="Failed" fill={COLORS.rose} radius={[4, 4, 0, 0]} maxBarSize={18} />
+                    <Line dataKey="total" name="Total" stroke={COLORS.zinc} strokeWidth={2} dot={false} />
+                  </ComposedChart>
+                </ResponsiveContainer>
+              )}
+            </CardContent>
+          </Card>
 
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-base">Status breakdown</CardTitle>
-            <CardDescription className="text-xs">All deliveries by current status</CardDescription>
-          </CardHeader>
-          <CardContent className="flex flex-col gap-4">
-            {pieData.length === 0 ? (
-              <EmptyChart height={220} message="No deliveries yet." />
-            ) : (
-              <>
-                <div className="relative mx-auto h-[210px] w-full max-w-[280px]">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <PieChart>
-                      <Pie
-                        data={pieData}
-                        dataKey="count"
-                        nameKey="name"
-                        innerRadius="62%"
-                        outerRadius="90%"
-                        paddingAngle={2}
-                        strokeWidth={0}
-                      >
-                        {pieData.map((entry) => (
-                          <Cell key={entry.status} fill={entry.color} />
-                        ))}
-                      </Pie>
-                      <Tooltip contentStyle={{ borderRadius: 8, fontSize: 12 }} />
-                    </PieChart>
-                  </ResponsiveContainer>
-                  <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center">
-                    <span className="text-2xl font-semibold tabular-nums">{stats.total}</span>
-                    <span className="text-xs text-muted-foreground">deliveries</span>
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base">Status breakdown</CardTitle>
+              <CardDescription className="text-xs">All deliveries by current status</CardDescription>
+            </CardHeader>
+            <CardContent className="flex flex-col gap-4">
+              {pieData.length === 0 ? (
+                <EmptyChart height={220} message="No deliveries yet." />
+              ) : (
+                <>
+                  <div className="relative mx-auto h-[210px] w-full max-w-[280px]">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <PieChart>
+                        <Pie
+                          data={pieData}
+                          dataKey="count"
+                          nameKey="name"
+                          innerRadius="62%"
+                          outerRadius="90%"
+                          paddingAngle={2}
+                          strokeWidth={0}
+                        >
+                          {pieData.map((entry) => (
+                            <Cell key={entry.status} fill={entry.color} />
+                          ))}
+                        </Pie>
+                        <Tooltip
+                          contentStyle={CHART_TOOLTIP_STYLE.contentStyle}
+                          labelStyle={CHART_TOOLTIP_STYLE.labelStyle}
+                          itemStyle={{ color: "var(--popover-foreground)" }}
+                        />
+                      </PieChart>
+                    </ResponsiveContainer>
+                    <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center">
+                      <span className="text-2xl font-semibold tabular-nums">{stats.total}</span>
+                      <span className="text-xs text-muted-foreground">deliveries</span>
+                    </div>
                   </div>
-                </div>
-                <ul className="grid grid-cols-1 gap-x-4 gap-y-1.5 sm:grid-cols-2 lg:grid-cols-1 xl:grid-cols-2">
-                  {pieData.map((s) => (
-                    <li key={s.status} className="flex items-center gap-2 text-xs">
-                      <span className="size-2.5 shrink-0 rounded-full" style={{ backgroundColor: s.color }} aria-hidden="true" />
-                      <span className="truncate text-muted-foreground">{s.name}</span>
-                      <span className="ml-auto font-medium tabular-nums">{s.count}</span>
-                    </li>
-                  ))}
-                </ul>
-              </>
-            )}
-          </CardContent>
-        </Card>
-      </section>
+                  <ul className="grid grid-cols-1 gap-x-4 gap-y-1.5 sm:grid-cols-2 lg:grid-cols-1 xl:grid-cols-2">
+                    {pieData.map((s) => (
+                      <li key={s.status} className="flex items-center gap-2 text-xs">
+                        <span className="size-2.5 shrink-0 rounded-full" style={{ backgroundColor: s.color }} aria-hidden="true" />
+                        <span className="truncate text-muted-foreground">{s.name}</span>
+                        <span className="ml-auto font-medium tabular-nums">{s.count}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </>
+              )}
+            </CardContent>
+          </Card>
+        </section>
+      )}
 
       {/* Needs attention */}
       {attentionCount > 0 && (
@@ -429,25 +467,25 @@ export function DashboardView() {
             <h2 id="needs-attention-heading" className="text-base font-semibold">
               Needs attention
             </h2>
-            {d.attention.failedDeliveries.length > 0 && (
+            {failedCount > 0 && (
               <Badge
                 variant="outline"
                 className="border-rose-200 bg-rose-50 text-rose-700 dark:border-rose-900 dark:bg-rose-950/40 dark:text-rose-300"
               >
-                {d.attention.failedDeliveries.length} failed
+                {failedCount} failed
               </Badge>
             )}
-            {d.attention.pendingUrgent.length > 0 && (
+            {urgentCount > 0 && (
               <Badge
                 variant="outline"
                 className="border-amber-200 bg-amber-50 text-amber-700 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-300"
               >
-                {d.attention.pendingUrgent.length} urgent
+                {urgentCount} urgent
               </Badge>
             )}
-            {d.attention.maintenanceVehicles.length > 0 && (
+            {offRoadCount > 0 && (
               <Badge variant="outline" className="bg-muted text-muted-foreground">
-                {d.attention.maintenanceVehicles.length} in maintenance
+                {offRoadCount} off the road
               </Badge>
             )}
           </div>
@@ -458,8 +496,8 @@ export function DashboardView() {
                 <CardHeader>
                   <CardTitle className="text-base">Failed — awaiting reassignment</CardTitle>
                   <CardDescription className="text-xs">
-                    {d.attention.failedDeliveries.length} failed{" "}
-                    {d.attention.failedDeliveries.length === 1 ? "delivery" : "deliveries"} to re-dispatch
+                    {failedCount} failed {failedCount === 1 ? "delivery" : "deliveries"} to re-dispatch
+                    {failedCount > failedList.length ? ` — showing ${failedList.length}` : ""}
                   </CardDescription>
                 </CardHeader>
                 <CardContent className="flex flex-col gap-2">
@@ -467,7 +505,9 @@ export function DashboardView() {
                     <AttentionRow key={f.id} onClick={() => goToDelivery(f.id)} ariaLabel={`Open delivery ${f.trackingCode}`}>
                       <span className="flex items-center justify-between gap-2">
                         <code className="font-mono text-xs text-muted-foreground">{f.trackingCode}</code>
-                        <span className="whitespace-nowrap text-xs text-muted-foreground">{timeAgo(f.createdAt)}</span>
+                        <span className="whitespace-nowrap text-xs text-muted-foreground">
+                          Created {formatDate(f.createdAt)}
+                        </span>
                       </span>
                       <span className="truncate text-sm font-medium">{f.recipientName}</span>
                       <span className="truncate text-xs text-rose-600 dark:text-rose-400">
@@ -482,8 +522,11 @@ export function DashboardView() {
             {urgentList.length > 0 && (
               <Card>
                 <CardHeader>
-                  <CardTitle className="text-base">Urgent / high pending</CardTitle>
-                  <CardDescription className="text-xs">High or urgent priority, not yet completed</CardDescription>
+                  <CardTitle className="text-base">Urgent / high — awaiting dispatch</CardTitle>
+                  <CardDescription className="text-xs">
+                    {urgentCount} high or urgent {urgentCount === 1 ? "delivery" : "deliveries"} awaiting dispatch
+                    {urgentCount > urgentList.length ? ` — showing ${urgentList.length}` : ""}
+                  </CardDescription>
                 </CardHeader>
                 <CardContent className="flex flex-col gap-2">
                   {urgentList.map((p) => (
@@ -500,14 +543,14 @@ export function DashboardView() {
               </Card>
             )}
 
-            {maintenanceList.length > 0 && (
+            {offRoadList.length > 0 && (
               <Card>
                 <CardHeader>
-                  <CardTitle className="text-base">Vehicles in maintenance</CardTitle>
-                  <CardDescription className="text-xs">Currently off the road</CardDescription>
+                  <CardTitle className="text-base">Vehicles off the road</CardTitle>
+                  <CardDescription className="text-xs">In maintenance or inactive</CardDescription>
                 </CardHeader>
                 <CardContent className="flex flex-col gap-2">
-                  {maintenanceList.map((v) => (
+                  {offRoadList.map((v) => (
                     <AttentionRow key={v.id} onClick={() => setView("vehicles")} ariaLabel={`Open vehicles for ${v.registrationNumber}`}>
                       <span className="flex items-center justify-between gap-2">
                         <code className="font-mono text-xs">{v.registrationNumber}</code>

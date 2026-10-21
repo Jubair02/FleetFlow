@@ -1,12 +1,13 @@
 /**
  * FleetFlow seed — realistic demo data for two organizations.
- * Run: bun prisma/seed.ts
+ * Run (DESTRUCTIVE — wipes the database): ALLOW_DESTRUCTIVE_SEED=1 npx tsx prisma/seed.ts
  */
 import { PrismaClient } from "@prisma/client";
 import { randomBytes, scryptSync } from "crypto";
 import { deflateSync } from "zlib";
 import { mkdir, rm, writeFile } from "fs/promises";
 import path from "path";
+import { failureReasonLabel } from "../src/lib/constants";
 
 const db = new PrismaClient();
 
@@ -190,6 +191,14 @@ const FAILED_SPECS: { day: number; hour: number; reason: string; driverIdx: numb
 const STORAGE = path.join(process.cwd(), "storage", "pod");
 
 async function main() {
+  // The seed WIPES every table and all POD files. Never let it run by accident
+  // against a shared/production database.
+  if (process.env.ALLOW_DESTRUCTIVE_SEED !== "1") {
+    throw new Error(
+      "Refusing to seed: this deletes ALL data in DATABASE_URL and storage/pod. " +
+        "Re-run with ALLOW_DESTRUCTIVE_SEED=1 only against a disposable database."
+    );
+  }
   console.log("Seeding FleetFlow…");
 
   // wipe (respect FK order)
@@ -225,7 +234,8 @@ async function main() {
   const tom = await mkUser(north.id, "Tom Herrera", "tom@northport.test", "Driver123!", "DRIVER");
 
   const drivers = [alex, priya, diego, sara];
-  const availability = ["ON_ROUTE", "ON_ROUTE", "AVAILABLE", "OFF_DUTY"];
+  // base availability — ON_ROUTE is derived from active jobs at the end of the seed
+  const availability = ["AVAILABLE", "AVAILABLE", "AVAILABLE", "OFF_DUTY"];
   const maxJobs = [4, 3, 3, 3];
   for (let i = 0; i < drivers.length; i++) {
     await db.driverProfile.create({
@@ -304,7 +314,7 @@ async function main() {
     const pickupAt = new Date(assignedAt.getTime() + 1.1 * HOUR);
     const transitAt = new Date(pickupAt.getTime() + 0.7 * HOUR);
     await db.assignment.create({
-      data: { deliveryId: d.id, driverId: driver.id, vehicleId: vehicle.id, assignedAt, completedAt: completed, active: false },
+      data: { deliveryId: d.id, driverId: driver.id, vehicleId: vehicle.id, assignedAt, completedAt: completed, active: false, outcome: "DELIVERED" },
     });
     await Promise.all([
       ev(d.id, "CREATED", created, "Morgan Reed", morgan.id, "Delivery created", true),
@@ -324,7 +334,7 @@ async function main() {
     await audit(morgan.id, "Morgan Reed", "DRIVER_ASSIGNED", "Delivery", d.id, { driver: driver.name, vehicle: vehicle.registrationNumber }, assignedAt);
   }
 
-  // 2) FAILED (unassigned → ready for reassignment)
+  // 2) FAILED (the failure closed the assignment → ready for reassignment)
   for (const spec of FAILED_SPECS) {
     const [rName, rPhone, dAddr] = nextRecipient();
     const created = daysAgo(spec.day, 8, 30);
@@ -353,7 +363,7 @@ async function main() {
     const pickupAt = spec.stage === "dropoff" ? new Date(assignedAt.getTime() + 1.2 * HOUR) : null;
     const transitAt = spec.stage === "dropoff" ? new Date(pickupAt!.getTime() + 0.6 * HOUR) : null;
     await db.assignment.create({
-      data: { deliveryId: d.id, driverId: driver.id, vehicleId: vehicle.id, assignedAt, unassignedAt: failedAt, active: false },
+      data: { deliveryId: d.id, driverId: driver.id, vehicleId: vehicle.id, assignedAt, unassignedAt: failedAt, active: false, outcome: "FAILED" },
     });
     const evs = [
       ev(d.id, "CREATED", created, "Morgan Reed", morgan.id, "Delivery created", true),
@@ -361,10 +371,7 @@ async function main() {
     ];
     if (pickupAt) evs.push(ev(d.id, "PICKED_UP", pickupAt, driver.name, driver.id, "Package collected from pickup point", true));
     if (transitAt) evs.push(ev(d.id, "IN_TRANSIT", transitAt, driver.name, driver.id, "Heading to delivery address", true));
-    evs.push(
-      ev(d.id, "FAILED", failedAt, driver.name, driver.id, spec.reason, true),
-      ev(d.id, "UNASSIGNED", new Date(failedAt.getTime() + 5 * 60000), "Morgan Reed", morgan.id, "Assignment released after failure — pending reassignment", false)
-    );
+    evs.push(ev(d.id, "FAILED", failedAt, driver.name, driver.id, failureReasonLabel(spec.reason), true));
     await Promise.all(evs);
     await audit(morgan.id, "Morgan Reed", "DELIVERY_CREATED", "Delivery", d.id, { trackingCode: code }, created);
     await audit(driver.id, driver.name, "DELIVERY_FAILED", "Delivery", d.id, { reason: spec.reason }, failedAt);
@@ -374,14 +381,14 @@ async function main() {
       await db.notification.create({
         data: {
           userId: a.id, type: "FAILED", channel: "IN_APP", title: "Delivery attempt failed",
-          body: `${code} — ${rName}. ${spec.reason.replace(/_/g, " ").toLowerCase()}. Action needed: reassign or reschedule.`,
+          body: `${code} — ${rName}. ${failureReasonLabel(spec.reason)}. Action needed: reassign or reschedule.`,
           deliveryId: d.id, createdAt: failedAt, readAt: spec.day >= 1 ? failedAt : null,
         },
       });
       await db.notification.create({
         data: {
           userId: a.id, type: "FAILED", channel: "EMAIL", title: `[FleetFlow] Failed delivery ${code}`,
-          body: `Delivery ${code} to ${rName} failed (${spec.reason}). Please review and reassign.`,
+          body: `Delivery ${code} to ${rName} failed (${failureReasonLabel(spec.reason)}). Please review and reassign.`,
           recipientEmail: a.email, deliveryId: d.id, createdAt: failedAt, readAt: spec.day >= 1 ? failedAt : null,
         },
       });
@@ -389,13 +396,14 @@ async function main() {
   }
 
   // 3) ACTIVE jobs (assigned / picked up / in transit)
+  // A vehicle is never with two drivers at once: Alex → DHK-1145, Priya → DHK-2087, Diego → MTR-7702.
   const ACTIVE_SPECS: { status: string; day: number; hour: number; driverIdx: number; vehicleIdx: number; stage: "assigned" | "picked" | "transit"; priority: string }[] = [
     { status: "ASSIGNED", day: 0, hour: 8, driverIdx: 0, vehicleIdx: 0, stage: "assigned", priority: "HIGH" },
     { status: "ASSIGNED", day: 0, hour: 8, driverIdx: 1, vehicleIdx: 1, stage: "assigned", priority: "NORMAL" },
     { status: "PICKED_UP", day: 0, hour: 7, driverIdx: 0, vehicleIdx: 0, stage: "picked", priority: "URGENT" },
-    { status: "IN_TRANSIT", day: 0, hour: 7, driverIdx: 1, vehicleIdx: 2, stage: "transit", priority: "HIGH" },
+    { status: "IN_TRANSIT", day: 0, hour: 7, driverIdx: 1, vehicleIdx: 1, stage: "transit", priority: "HIGH" },
     { status: "IN_TRANSIT", day: 0, hour: 6, driverIdx: 2, vehicleIdx: 4, stage: "transit", priority: "NORMAL" },
-    { status: "ASSIGNED", day: 1, hour: 16, driverIdx: 2, vehicleIdx: 1, stage: "assigned", priority: "NORMAL" },
+    { status: "ASSIGNED", day: 1, hour: 16, driverIdx: 2, vehicleIdx: 4, stage: "assigned", priority: "NORMAL" },
   ];
   for (const spec of ACTIVE_SPECS) {
     const [rName, rPhone, dAddr] = nextRecipient();
@@ -543,6 +551,14 @@ async function main() {
   if (npVehicle && npAssigned) {
     await db.assignment.create({ data: { deliveryId: npAssigned.id, driverId: tom.id, vehicleId: npVehicle.id } });
     await ev(npAssigned.id, "ASSIGNED", new Date(), "Nina Patel", nina.id, `Assigned to Tom Herrera · ${npVehicle.registrationNumber}`, true);
+  }
+
+  // driver availability follows active jobs (same rule as syncDriverAvailability)
+  for (const u of [...drivers, tom]) {
+    const active = await db.assignment.count({ where: { driverId: u.id, active: true } });
+    if (active > 0) {
+      await db.driverProfile.update({ where: { userId: u.id }, data: { availability: "ON_ROUTE" } });
+    }
   }
 
   const counts = {

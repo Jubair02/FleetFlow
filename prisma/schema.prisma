@@ -3,7 +3,7 @@ generator client {
 }
 
 datasource db {
-  provider = "sqlite"
+  provider = "postgresql"
   url      = env("DATABASE_URL")
 }
 
@@ -14,14 +14,36 @@ datasource db {
 model Organization {
   id        String   @id @default(cuid())
   name      String
-  plan      String   @default("trial")
+  plan      String   @default("trial") // trial | starter | growth | business — see src/lib/plans.ts
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  users      User[]
-  vehicles   Vehicle[]
-  deliveries Delivery[]
-  auditLogs  AuditLog[]
+  // Company profile & settings (onboarding)
+  phone                 String?
+  contactEmail          String?
+  address               String?
+  defaultPickupAddress  String?
+  timezone              String    @default("Asia/Dhaka")
+  onboardingDismissedAt DateTime?
+
+  // Platform account status (managed by FleetFlow super admins only).
+  // SUSPENDED blocks sign-in and API use for the company's staff and drivers;
+  // no data is deleted. Public tracking links keep working.
+  status          String    @default("ACTIVE") // ACTIVE | SUSPENDED
+  suspendedAt     DateTime?
+  suspendedReason String?
+
+  // Subscription bookkeeping, recorded MANUALLY (no payment integration).
+  subscriptionStatus String    @default("TRIAL") // TRIAL | ACTIVE | PAST_DUE | CANCELLED
+  paidUntil          DateTime?
+  billingNotes       String?
+
+  users         User[]
+  vehicles      Vehicle[]
+  deliveries    Delivery[]
+  auditLogs     AuditLog[]
+  notifications Notification[]
+  importBatches ImportBatch[]
 }
 
 model User {
@@ -33,6 +55,8 @@ model User {
   passwordHash   String
   role           String // ADMIN | DRIVER
   active         Boolean      @default(true)
+  mustChangePassword Boolean  @default(false) // set when an admin creates/resets the password
+  lastLoginAt    DateTime?
   createdAt      DateTime     @default(now())
   updatedAt      DateTime     @updatedAt
 
@@ -95,6 +119,10 @@ model Delivery {
   pickupAddress   String
   deliveryAddress String
   instructions    String?
+  externalRef     String? // the business's own order/invoice number (CSV import duplicate check)
+  recipientEmail  String? // optional: customer gets the tracking link by email
+  importBatchId   String?
+  importBatch     ImportBatch? @relation(fields: [importBatchId], references: [id])
   priority        String       @default("NORMAL") // LOW | NORMAL | HIGH | URGENT
   status          String       @default("CREATED") // CREATED | ASSIGNED | PICKED_UP | IN_TRANSIT | DELIVERED | FAILED | CANCELLED
   expectedAt      DateTime?
@@ -110,6 +138,7 @@ model Delivery {
   @@index([organizationId, status])
   @@index([organizationId, createdAt])
   @@index([organizationId, expectedAt])
+  @@index([organizationId, externalRef])
 }
 
 model Assignment {
@@ -124,6 +153,7 @@ model Assignment {
   unassignedAt DateTime?
   completedAt  DateTime?
   active       Boolean   @default(true)
+  outcome      String? // set when closed: DELIVERED | FAILED | CANCELLED | UNASSIGNED
 
   @@index([driverId, active])
   @@index([vehicleId, active])
@@ -163,19 +193,51 @@ model ProofOfDelivery {
 }
 
 model Notification {
-  id             String    @id @default(cuid())
-  userId         String
-  user           User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  id             String        @id @default(cuid())
+  organizationId String?
+  organization   Organization? @relation(fields: [organizationId], references: [id])
+  userId         String? // null for emails to people without an account (e.g. delivery recipients)
+  user           User?         @relation(fields: [userId], references: [id], onDelete: Cascade)
   type           String // NEW_ASSIGNMENT | UNASSIGNED | PICKED_UP | IN_TRANSIT | DELIVERED | FAILED | POD_UPLOADED | TRACKING
-  channel        String    @default("IN_APP") // IN_APP | EMAIL
+  channel        String        @default("IN_APP") // IN_APP | EMAIL
   title          String
   body           String
-  recipientEmail String? // used for EMAIL channel (simulated outbox)
+  recipientEmail String? // used for EMAIL channel
   deliveryId     String?
   readAt         DateTime?
-  createdAt      DateTime  @default(now())
+  createdAt      DateTime      @default(now())
+
+  // Email delivery state (channel=EMAIL): PENDING | SENDING | SENT | FAILED | SIMULATED
+  status            String?
+  attempts          Int       @default(0)
+  sentAt            DateTime?
+  lastError         String?
+  providerMessageId String?
+  dedupeKey         String?   @unique // prevents duplicate sends for the same event
 
   @@index([userId, channel, readAt])
+  @@index([organizationId, channel, createdAt])
+}
+
+// One row per committed CSV import; fileHash blocks importing the same file twice.
+model ImportBatch {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+  fileName       String
+  fileHash       String
+  rowCount       Int
+  importedCount  Int
+  skippedCount   Int
+  failedCount    Int
+  createdById    String?
+  createdByName  String?
+  createdAt      DateTime     @default(now())
+
+  deliveries Delivery[]
+
+  @@unique([organizationId, fileHash])
+  @@index([organizationId, createdAt])
 }
 
 model AuditLog {
@@ -190,5 +252,53 @@ model AuditLog {
   detail         String? // JSON string
   createdAt      DateTime     @default(now())
 
+  @@index([organizationId, createdAt])
+}
+
+// ─────────────────────────────────────────────────────────────
+// Platform (super admin) — deliberately separate from tenant users.
+// No User field grants platform access; platform admins are created
+// only by scripts/create-super-admin.mjs (no public registration).
+// ─────────────────────────────────────────────────────────────
+
+model PlatformAdmin {
+  id                 String    @id @default(cuid())
+  name               String
+  email              String    @unique
+  passwordHash       String
+  active             Boolean   @default(true)
+  mustChangePassword Boolean   @default(false)
+  lastLoginAt        DateTime?
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+
+  sessions PlatformSession[]
+}
+
+model PlatformSession {
+  id        String        @id @default(cuid())
+  token     String        @unique // SHA-256 of the cookie token
+  adminId   String
+  admin     PlatformAdmin @relation(fields: [adminId], references: [id], onDelete: Cascade)
+  expiresAt DateTime
+  createdAt DateTime      @default(now())
+
+  @@index([adminId])
+}
+
+// Append-only log of super admin actions (never passwords/tokens).
+model PlatformAuditLog {
+  id             String   @id @default(cuid())
+  actorId        String?
+  actorName      String?
+  action         String // ORG_CREATED | ORG_SUSPENDED | ORG_REACTIVATED | PLAN_CHANGED | SUBSCRIPTION_UPDATED | USER_* | PLATFORM_LOGIN | ...
+  organizationId String?
+  targetType     String // Organization | User | PlatformAdmin
+  targetId       String?
+  detail         String? // JSON, safe metadata only
+  ip             String?
+  createdAt      DateTime @default(now())
+
+  @@index([createdAt])
   @@index([organizationId, createdAt])
 }

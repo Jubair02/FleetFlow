@@ -1,28 +1,22 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { toast } from "sonner";
-import { ChevronLeft, ChevronRight, Loader2, Package, Plus, Search } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { ChevronLeft, ChevronRight, Download, FileSpreadsheet, Package, Plus, Search, X } from "lucide-react";
 
-import { api, useApiData } from "@/lib/api-client";
+import { useApiData } from "@/lib/api-client";
 import { useAppStore } from "@/store/app-store";
-import type { DeliveriesPage, Delivery } from "@/lib/types";
+import type { DeliveriesPage } from "@/lib/types";
 import { DELIVERY_STATUSES, PRIORITIES, PRIORITY_LABELS, STATUS_LABELS } from "@/lib/constants";
 import { PriorityBadge, StatusBadge } from "@/components/fleetflow/badges";
+import { Badge } from "@/components/ui/badge";
 import { formatDate, friendlyDueDate, truncate } from "@/lib/format";
 import { DeliveryDetailDialog } from "@/components/fleetflow/delivery-detail-dialog";
+import { DeliveryFormDialog } from "@/components/fleetflow/delivery-form-dialog";
+import { ImportDialog, TEMPLATE_URL } from "@/components/fleetflow/import-dialog";
+import { isRangeInverted, rangeFromParam, rangeToParam } from "@/components/fleetflow/date-range";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import {
   Select,
   SelectContent,
@@ -39,30 +33,9 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { Textarea } from "@/components/ui/textarea";
-import { cn } from "@/lib/utils";
 
 const PAGE_SIZE = 10;
-
-interface CreateFormState {
-  recipientName: string;
-  recipientPhone: string;
-  pickupAddress: string;
-  deliveryAddress: string;
-  instructions: string;
-  priority: string;
-  expectedAtLocal: string;
-}
-
-const EMPTY_FORM: CreateFormState = {
-  recipientName: "",
-  recipientPhone: "",
-  pickupAddress: "",
-  deliveryAddress: "",
-  instructions: "",
-  priority: "NORMAL",
-  expectedAtLocal: "",
-};
+const SEARCH_DEBOUNCE_MS = 350;
 
 function PaginationBar({
   data,
@@ -111,119 +84,149 @@ function PaginationBar({
 
 export function DeliveriesView() {
   // ── filters ───────────────────────────────────────────────
+  // Every handler that changes a filter also resets pagination to page 1.
   const [searchInput, setSearchInput] = useState("");
   const [search, setSearch] = useState("");
-  const [statusFilter, setStatusFilter] = useState("ALL");
+  // A one-shot preset (e.g. dashboard "Failed" KPI) seeds the status filter on mount.
+  const [statusFilter, setStatusFilter] = useState(() => useAppStore.getState().deliveriesStatusPreset ?? "ALL");
   const [priorityFilter, setPriorityFilter] = useState("ALL");
+  const [fromDay, setFromDay] = useState("");
+  const [toDay, setToDay] = useState("");
   const [page, setPage] = useState(1);
+  /** Set by "View imported deliveries": show exactly one import batch. */
+  const [importBatch, setImportBatch] = useState<{ id: string; fileName: string } | null>(null);
+  const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Debounce the search box (350 ms)
   useEffect(() => {
-    const t = setTimeout(() => setSearch(searchInput.trim()), 350);
-    return () => clearTimeout(t);
-  }, [searchInput]);
+    // Consume the preset so it doesn't re-apply on the next visit.
+    const { deliveriesStatusPreset, setDeliveriesStatusPreset } = useAppStore.getState();
+    if (deliveriesStatusPreset) setDeliveriesStatusPreset(null);
+    return () => {
+      if (searchTimer.current) clearTimeout(searchTimer.current);
+    };
+  }, []);
 
-  // Any filter change resets pagination
-  useEffect(() => {
+  function handleSearchChange(value: string) {
+    setSearchInput(value);
+    if (searchTimer.current) clearTimeout(searchTimer.current);
+    searchTimer.current = setTimeout(() => {
+      const next = value.trim();
+      if (next === search) return;
+      setSearch(next);
+      setPage(1);
+    }, SEARCH_DEBOUNCE_MS);
+  }
+
+  function handleStatusChange(v: string) {
+    setStatusFilter(v);
     setPage(1);
-  }, [search, statusFilter, priorityFilter]);
+  }
+
+  function handlePriorityChange(v: string) {
+    setPriorityFilter(v);
+    setPage(1);
+  }
+
+  function handleFromChange(v: string) {
+    setFromDay(v);
+    setPage(1);
+  }
+
+  function handleToChange(v: string) {
+    setToDay(v);
+    setPage(1);
+  }
+
+  function clearFilters() {
+    if (searchTimer.current) clearTimeout(searchTimer.current);
+    setSearchInput("");
+    setSearch("");
+    setStatusFilter("ALL");
+    setPriorityFilter("ALL");
+    setFromDay("");
+    setToDay("");
+    setImportBatch(null);
+    setPage(1);
+  }
+
+  const rangeInverted = isRangeInverted(fromDay, toDay);
+  const hasFilters =
+    !!searchInput || statusFilter !== "ALL" || priorityFilter !== "ALL" || !!fromDay || !!toDay || !!importBatch;
 
   const params = new URLSearchParams();
   if (search) params.set("search", search);
+  if (importBatch) params.set("importBatchId", importBatch.id);
   if (statusFilter !== "ALL") params.set("status", statusFilter);
   if (priorityFilter !== "ALL") params.set("priority", priorityFilter);
+  if (!rangeInverted) {
+    const from = rangeFromParam(fromDay);
+    const to = rangeToParam(toDay);
+    if (from) params.set("from", from);
+    if (to) params.set("to", to);
+  }
   params.set("page", String(page));
   params.set("pageSize", String(PAGE_SIZE));
 
-  const { data, loading, error } = useApiData<DeliveriesPage>(`/api/deliveries?${params.toString()}`, [page]);
+  const { data, loading, error } = useApiData<DeliveriesPage>(`/api/deliveries?${params.toString()}`);
 
-  // If the list shrank and the current page no longer exists, step back.
-  useEffect(() => {
-    if (data && data.page > data.pageCount) setPage(data.pageCount);
-  }, [data]);
+  // If the list shrank and the current page no longer exists, step back
+  // (state adjusted during render, keyed on the answer for this exact page).
+  if (data && !loading && data.page === page && page > data.pageCount) {
+    setPage(data.pageCount);
+  }
 
   // ── detail dialog ─────────────────────────────────────────
-  const [detailId, setDetailId] = useState<string | null>(null);
-  const [detailOpen, setDetailOpen] = useState(false);
+  // The store's focusDeliveryId is the single source of truth for "open";
+  // shownId keeps the last delivery rendered so the close animation has content.
   const focusDeliveryId = useAppStore((s) => s.focusDeliveryId);
   const focusDelivery = useAppStore((s) => s.focusDelivery);
-
-  useEffect(() => {
-    if (focusDeliveryId) {
-      setDetailId(focusDeliveryId);
-      setDetailOpen(true);
-    }
-  }, [focusDeliveryId]);
+  const [shownId, setShownId] = useState<string | null>(focusDeliveryId);
+  if (focusDeliveryId && focusDeliveryId !== shownId) {
+    setShownId(focusDeliveryId);
+  }
 
   function openDetail(id: string) {
-    setDetailId(id);
-    setDetailOpen(true);
+    focusDelivery(id);
   }
 
   function handleDetailOpenChange(o: boolean) {
-    setDetailOpen(o);
-    if (!o) {
-      setDetailId(null);
-      focusDelivery(null);
-    }
+    if (!o) focusDelivery(null);
   }
 
-  // ── create dialog ─────────────────────────────────────────
+  // ── create / import dialogs ───────────────────────────────
   const [createOpen, setCreateOpen] = useState(false);
-  const [form, setForm] = useState<CreateFormState>(EMPTY_FORM);
-  const [formErrors, setFormErrors] = useState<Record<string, boolean>>({});
-  const [submitting, setSubmitting] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
 
-  function handleCreateOpenChange(o: boolean) {
-    setCreateOpen(o);
-    if (!o) {
-      setForm(EMPTY_FORM);
-      setFormErrors({});
-      setSubmitting(false);
-    }
-  }
+  // One-shot action from elsewhere (e.g. dashboard "Import CSV"): open the
+  // dialog during render, then clear the store so it doesn't re-open.
+  const deliveriesAction = useAppStore((s) => s.deliveriesAction);
+  if (deliveriesAction === "create" && !createOpen) setCreateOpen(true);
+  if (deliveriesAction === "import" && !importOpen) setImportOpen(true);
+  useEffect(() => {
+    if (deliveriesAction) useAppStore.getState().setDeliveriesAction(null);
+  }, [deliveriesAction]);
 
-  async function handleCreateSubmit(e: React.FormEvent) {
-    e.preventDefault();
-    const errs: Record<string, boolean> = {
-      recipientName: !form.recipientName.trim(),
-      recipientPhone: !form.recipientPhone.trim(),
-      pickupAddress: !form.pickupAddress.trim(),
-      deliveryAddress: !form.deliveryAddress.trim(),
-    };
-    setFormErrors(errs);
-    if (Object.values(errs).some(Boolean)) {
-      toast.error("Please fill in the required fields");
-      return;
-    }
-    setSubmitting(true);
-    try {
-      const res = await api.post<{ delivery: Delivery }>("/api/deliveries", {
-        recipientName: form.recipientName.trim(),
-        recipientPhone: form.recipientPhone.trim(),
-        pickupAddress: form.pickupAddress.trim(),
-        deliveryAddress: form.deliveryAddress.trim(),
-        instructions: form.instructions.trim() || undefined,
-        priority: form.priority,
-        expectedAt: form.expectedAtLocal ? new Date(form.expectedAtLocal).toISOString() : null,
-      });
-      toast.success(`Delivery created — tracking code ${res.delivery.trackingCode}`);
-      useAppStore.getState().bump();
-      handleCreateOpenChange(false);
-    } catch (e) {
-      toast.error(e instanceof Error ? e.message : "Failed to create delivery");
-    } finally {
-      setSubmitting(false);
-    }
+  /** After an import: show exactly the deliveries from that batch. */
+  function showImported(batch: { id: string; fileName: string }) {
+    if (searchTimer.current) clearTimeout(searchTimer.current);
+    setSearchInput("");
+    setSearch("");
+    setImportBatch(batch);
+    setStatusFilter("ALL");
+    setPriorityFilter("ALL");
+    setFromDay("");
+    setToDay("");
+    setPage(1);
   }
 
   const items = data?.items ?? [];
-  const isEmpty = !loading && !error && data && items.length === 0;
+  const isEmpty = !loading && !error && !!data && items.length === 0;
+  const showList = !!data && !isEmpty;
 
   return (
     <div className="space-y-4">
       {/* Toolbar */}
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+      <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-center">
         <div className="relative w-full sm:max-w-xs">
           <Search
             aria-hidden
@@ -232,14 +235,14 @@ export function DeliveriesView() {
           <Input
             type="search"
             value={searchInput}
-            onChange={(e) => setSearchInput(e.target.value)}
+            onChange={(e) => handleSearchChange(e.target.value)}
             placeholder="Search tracking code, recipient, address…"
             aria-label="Search deliveries"
             className="min-h-11 pl-9 sm:min-h-9"
           />
         </div>
 
-        <Select value={statusFilter} onValueChange={setStatusFilter}>
+        <Select value={statusFilter} onValueChange={handleStatusChange}>
           <SelectTrigger className="min-h-11 w-full sm:w-48 sm:min-h-9" aria-label="Filter by status">
             <SelectValue placeholder="Status" />
           </SelectTrigger>
@@ -253,7 +256,7 @@ export function DeliveriesView() {
           </SelectContent>
         </Select>
 
-        <Select value={priorityFilter} onValueChange={setPriorityFilter}>
+        <Select value={priorityFilter} onValueChange={handlePriorityChange}>
           <SelectTrigger className="min-h-11 w-full sm:w-40 sm:min-h-9" aria-label="Filter by priority">
             <SelectValue placeholder="Priority" />
           </SelectTrigger>
@@ -267,16 +270,74 @@ export function DeliveriesView() {
           </SelectContent>
         </Select>
 
+        <div className="flex w-full items-center gap-2 sm:w-auto">
+          <Input
+            type="date"
+            value={fromDay}
+            max={toDay || undefined}
+            onChange={(e) => handleFromChange(e.target.value)}
+            aria-label="Created from (inclusive)"
+            aria-invalid={rangeInverted}
+            className="min-h-11 flex-1 sm:w-38 sm:min-h-9 sm:flex-none"
+          />
+          <span className="text-sm text-muted-foreground" aria-hidden>
+            –
+          </span>
+          <Input
+            type="date"
+            value={toDay}
+            min={fromDay || undefined}
+            onChange={(e) => handleToChange(e.target.value)}
+            aria-label="Created to (inclusive)"
+            aria-invalid={rangeInverted}
+            className="min-h-11 flex-1 sm:w-38 sm:min-h-9 sm:flex-none"
+          />
+        </div>
+
+        {importBatch ? (
+          <Badge variant="secondary" className="min-h-9 gap-1.5 px-3 font-normal">
+            Imported from <span className="font-medium">{importBatch.fileName}</span>
+            <button
+              type="button"
+              aria-label="Show all deliveries"
+              className="rounded-sm opacity-70 hover:opacity-100"
+              onClick={() => {
+                setImportBatch(null);
+                setPage(1);
+              }}
+            >
+              <X className="size-3.5" />
+            </button>
+          </Badge>
+        ) : null}
+
+        {hasFilters ? (
+          <Button variant="ghost" className="min-h-11 sm:min-h-9" onClick={clearFilters}>
+            <X /> Clear filters
+          </Button>
+        ) : null}
+
         <div className="hidden flex-1 sm:block" aria-hidden />
 
-        <Button className="min-h-11 sm:min-h-9" onClick={() => handleCreateOpenChange(true)}>
-          <Plus /> New delivery
-        </Button>
+        <div className="flex gap-2">
+          <Button variant="outline" className="min-h-11 flex-1 sm:min-h-9 sm:flex-none" onClick={() => setImportOpen(true)}>
+            <FileSpreadsheet /> Import CSV
+          </Button>
+          <Button className="min-h-11 flex-1 sm:min-h-9 sm:flex-none" onClick={() => setCreateOpen(true)}>
+            <Plus /> New delivery
+          </Button>
+        </div>
       </div>
+
+      {rangeInverted ? (
+        <p className="text-sm text-destructive" role="alert">
+          The start date is after the end date — the date filter is ignored until it&apos;s fixed.
+        </p>
+      ) : null}
 
       {/* Error */}
       {error ? (
-        <Card className="border-destructive/40 p-4 text-sm text-destructive">
+        <Card className="border-destructive/40 p-4 text-sm text-destructive" role="alert">
           Couldn&apos;t load deliveries: {error}
         </Card>
       ) : null}
@@ -298,15 +359,46 @@ export function DeliveriesView() {
       ) : null}
 
       {/* Empty state */}
-      {isEmpty ? (
+      {isEmpty && hasFilters ? (
         <div className="flex flex-col items-center justify-center gap-3 rounded-xl border border-dashed p-10 text-center">
           <Package className="size-10 text-muted-foreground" aria-hidden />
           <p className="text-sm text-muted-foreground">No deliveries match your filters.</p>
+          <Button variant="outline" size="sm" className="min-h-11 sm:min-h-9" onClick={clearFilters}>
+            Clear filters
+          </Button>
+        </div>
+      ) : null}
+
+      {/* First-run empty state: the organization has no deliveries at all */}
+      {isEmpty && !hasFilters ? (
+        <div className="flex flex-col items-center justify-center gap-4 rounded-xl border border-dashed px-6 py-12 text-center">
+          <div className="flex size-14 items-center justify-center rounded-full bg-primary/10">
+            <Package className="size-7 text-primary" aria-hidden />
+          </div>
+          <div className="max-w-md space-y-1">
+            <p className="text-base font-semibold">No deliveries yet</p>
+            <p className="text-sm text-muted-foreground">
+              Add your first order by hand, or bring in today&apos;s orders from a spreadsheet — up to 1,000 at a time.
+            </p>
+          </div>
+          <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row">
+            <Button className="min-h-11 sm:min-h-9" onClick={() => setCreateOpen(true)}>
+              <Plus /> Create delivery
+            </Button>
+            <Button variant="outline" className="min-h-11 sm:min-h-9" onClick={() => setImportOpen(true)}>
+              <FileSpreadsheet /> Import from CSV
+            </Button>
+            <Button asChild variant="ghost" className="min-h-11 sm:min-h-9">
+              <a href={TEMPLATE_URL} download>
+                <Download /> Download template
+              </a>
+            </Button>
+          </div>
         </div>
       ) : null}
 
       {/* Desktop table */}
-      {data && !isEmpty && !error ? (
+      {showList && data ? (
         <Card className="hidden gap-0 overflow-hidden py-0 md:block">
           <CardContent className="p-0">
             <Table>
@@ -321,7 +413,7 @@ export function DeliveriesView() {
                   <TableHead className="px-4">Created</TableHead>
                 </TableRow>
               </TableHeader>
-              <TableBody>
+              <TableBody aria-busy={loading}>
                 {items.map((d) => (
                   <TableRow
                     key={d.id}
@@ -360,7 +452,7 @@ export function DeliveriesView() {
                     <TableCell className="px-4 py-3 text-muted-foreground">{formatDate(d.createdAt)}</TableCell>
                   </TableRow>
                 ))}
-                {loading && data
+                {loading
                   ? Array.from({ length: 3 }).map((_, i) => (
                       <TableRow key={`skeleton-${i}`} className="hover:bg-transparent">
                         <TableCell colSpan={7} className="px-4 py-3">
@@ -372,22 +464,21 @@ export function DeliveriesView() {
               </TableBody>
             </Table>
           </CardContent>
-          {data ? (
-            <div className="border-t">
-              <PaginationBar data={data} loading={loading} onPage={setPage} />
-            </div>
-          ) : null}
+          <div className="border-t">
+            <PaginationBar data={data} loading={loading} onPage={setPage} />
+          </div>
         </Card>
       ) : null}
 
       {/* Mobile cards */}
-      {data && !isEmpty && !error ? (
+      {showList && data ? (
         <div className="space-y-3 md:hidden">
           {items.map((d) => (
             <Card
               key={d.id}
               role="button"
               tabIndex={0}
+              aria-label={`Open details for ${d.trackingCode}`}
               className="cursor-pointer gap-2 p-4 transition-colors hover:bg-accent/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
               onClick={() => openDetail(d.id)}
               onKeyDown={(e) => {
@@ -412,181 +503,26 @@ export function DeliveriesView() {
               </div>
             </Card>
           ))}
-          {loading && data
+          {loading
             ? Array.from({ length: 2 }).map((_, i) => <Skeleton key={`sk-${i}`} className="h-32 w-full rounded-xl" />)
             : null}
-          {data ? <PaginationBar data={data} loading={loading} onPage={setPage} /> : null}
+          <PaginationBar data={data} loading={loading} onPage={setPage} />
         </div>
       ) : null}
 
-      {/* Detail dialog */}
-      <DeliveryDetailDialog deliveryId={detailId} open={detailOpen} onOpenChange={handleDetailOpenChange} />
+      {/* Detail dialog — keyed by delivery so switching never flashes the previous one */}
+      <DeliveryDetailDialog
+        key={shownId ?? "none"}
+        deliveryId={shownId}
+        open={!!focusDeliveryId}
+        onOpenChange={handleDetailOpenChange}
+      />
 
       {/* Create dialog */}
-      <Dialog open={createOpen} onOpenChange={handleCreateOpenChange}>
-        <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-lg" aria-describedby={undefined}>
-          <DialogHeader>
-            <DialogTitle>New delivery</DialogTitle>
-            <DialogDescription>
-              Create a delivery order — it enters the dispatch queue for assignment.
-            </DialogDescription>
-          </DialogHeader>
+      <DeliveryFormDialog open={createOpen} onOpenChange={setCreateOpen} />
 
-          <form className="space-y-4" onSubmit={handleCreateSubmit} noValidate>
-            <div className="grid gap-4 sm:grid-cols-2">
-              <div className="space-y-2">
-                <Label htmlFor="new-recipient-name">
-                  Recipient name <span className="text-destructive">*</span>
-                </Label>
-                <Input
-                  id="new-recipient-name"
-                  value={form.recipientName}
-                  onChange={(e) => {
-                    setForm((f) => ({ ...f, recipientName: e.target.value }));
-                    if (e.target.value.trim()) setFormErrors((er) => ({ ...er, recipientName: false }));
-                  }}
-                  aria-invalid={!!formErrors.recipientName}
-                  placeholder="Jane Doe"
-                  className={cn(
-                    "min-h-11 sm:min-h-9",
-                    formErrors.recipientName && "border-destructive focus-visible:ring-destructive/30",
-                  )}
-                />
-                {formErrors.recipientName ? (
-                  <p className="text-xs text-destructive">Recipient name is required.</p>
-                ) : null}
-              </div>
-
-              <div className="space-y-2">
-                <Label htmlFor="new-recipient-phone">
-                  Contact number <span className="text-destructive">*</span>
-                </Label>
-                <Input
-                  id="new-recipient-phone"
-                  type="tel"
-                  value={form.recipientPhone}
-                  onChange={(e) => {
-                    setForm((f) => ({ ...f, recipientPhone: e.target.value }));
-                    if (e.target.value.trim()) setFormErrors((er) => ({ ...er, recipientPhone: false }));
-                  }}
-                  aria-invalid={!!formErrors.recipientPhone}
-                  placeholder="+1 555 010 1234"
-                  className={cn(
-                    "min-h-11 sm:min-h-9",
-                    formErrors.recipientPhone && "border-destructive focus-visible:ring-destructive/30",
-                  )}
-                />
-                {formErrors.recipientPhone ? (
-                  <p className="text-xs text-destructive">Contact number is required.</p>
-                ) : null}
-              </div>
-            </div>
-
-            <div className="space-y-2">
-              <Label htmlFor="new-pickup">
-                Pickup address <span className="text-destructive">*</span>
-              </Label>
-              <Textarea
-                id="new-pickup"
-                value={form.pickupAddress}
-                onChange={(e) => {
-                  setForm((f) => ({ ...f, pickupAddress: e.target.value }));
-                  if (e.target.value.trim()) setFormErrors((er) => ({ ...er, pickupAddress: false }));
-                }}
-                aria-invalid={!!formErrors.pickupAddress}
-                placeholder="Warehouse 4, 12 Harbor Industrial Park"
-                className={cn(
-                  "min-h-11 sm:min-h-9",
-                  formErrors.pickupAddress && "border-destructive focus-visible:ring-destructive/30",
-                )}
-              />
-              {formErrors.pickupAddress ? (
-                <p className="text-xs text-destructive">Pickup address is required.</p>
-              ) : null}
-            </div>
-
-            <div className="space-y-2">
-              <Label htmlFor="new-delivery-address">
-                Delivery address <span className="text-destructive">*</span>
-              </Label>
-              <Textarea
-                id="new-delivery-address"
-                value={form.deliveryAddress}
-                onChange={(e) => {
-                  setForm((f) => ({ ...f, deliveryAddress: e.target.value }));
-                  if (e.target.value.trim()) setFormErrors((er) => ({ ...er, deliveryAddress: false }));
-                }}
-                aria-invalid={!!formErrors.deliveryAddress}
-                placeholder="88 Maple Street, Apt 3B, Springfield"
-                className={cn(
-                  formErrors.deliveryAddress && "border-destructive focus-visible:ring-destructive/30",
-                )}
-              />
-              {formErrors.deliveryAddress ? (
-                <p className="text-xs text-destructive">Delivery address is required.</p>
-              ) : null}
-            </div>
-
-            <div className="space-y-2">
-              <Label htmlFor="new-instructions">Delivery instructions (optional)</Label>
-              <Textarea
-                id="new-instructions"
-                value={form.instructions}
-                onChange={(e) => setForm((f) => ({ ...f, instructions: e.target.value }))}
-                placeholder="Leave at the front desk, call on arrival…"
-              />
-            </div>
-
-            <div className="grid gap-4 sm:grid-cols-2">
-              <div className="space-y-2">
-                <Label htmlFor="new-priority">Priority</Label>
-                <Select
-                  value={form.priority}
-                  onValueChange={(v) => setForm((f) => ({ ...f, priority: v }))}
-                >
-                  <SelectTrigger id="new-priority" className="min-h-11 w-full sm:min-h-9">
-                    <SelectValue placeholder="Priority" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {PRIORITIES.map((p) => (
-                      <SelectItem key={p} value={p}>
-                        {PRIORITY_LABELS[p]}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-
-              <div className="space-y-2">
-                <Label htmlFor="new-expected">Expected delivery (optional)</Label>
-                <Input
-                  id="new-expected"
-                  type="datetime-local"
-                  value={form.expectedAtLocal}
-                  onChange={(e) => setForm((f) => ({ ...f, expectedAtLocal: e.target.value }))}
-                  className="min-h-11 sm:min-h-9"
-                />
-              </div>
-            </div>
-
-            <DialogFooter className="gap-2 pt-2">
-              <Button
-                type="button"
-                variant="outline"
-                className="min-h-11 sm:min-h-9"
-                disabled={submitting}
-                onClick={() => handleCreateOpenChange(false)}
-              >
-                Cancel
-              </Button>
-              <Button type="submit" className="min-h-11 sm:min-h-9" disabled={submitting}>
-                {submitting ? <Loader2 className="animate-spin" /> : <Plus />}
-                Create delivery
-              </Button>
-            </DialogFooter>
-          </form>
-        </DialogContent>
-      </Dialog>
+      {/* Bulk CSV import */}
+      <ImportDialog open={importOpen} onOpenChange={setImportOpen} onViewImported={showImported} />
     </div>
   );
 }

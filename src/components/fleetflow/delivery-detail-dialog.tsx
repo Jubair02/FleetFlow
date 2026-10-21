@@ -9,6 +9,7 @@ import {
   Copy,
   Link2,
   Loader2,
+  Pencil,
   PenLine,
   ShieldAlert,
   StickyNote,
@@ -19,7 +20,7 @@ import {
 
 import { api, useApiData } from "@/lib/api-client";
 import { useAppStore } from "@/store/app-store";
-import type { DeliveryDetail, PodItem } from "@/lib/types";
+import type { AssignmentHistoryItem, DeliveryDetail, PodItem } from "@/lib/types";
 import type { DeliveryStatus } from "@/lib/constants";
 import {
   EVENT_TYPE_LABELS,
@@ -30,6 +31,7 @@ import {
 import { PriorityBadge, STATUS_ICONS, StatusBadge, VehicleTypeLabel } from "@/components/fleetflow/badges";
 import { formatDateTime, friendlyDueDate, timeAgo, truncate } from "@/lib/format";
 import { AssignDialog } from "@/components/fleetflow/assign-dialog";
+import { DeliveryFormDialog } from "@/components/fleetflow/delivery-form-dialog";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -67,6 +69,39 @@ import { cn } from "@/lib/utils";
 // Statuses an admin may force a delivery into via the audited override path.
 const OVERRIDE_TARGETS: DeliveryStatus[] = ["DELIVERED", "FAILED", "CANCELLED", "IN_TRANSIT", "PICKED_UP"];
 
+/**
+ * Override targets the API will accept from the current state:
+ *  - from DELIVERED only CREATED or FAILED; from CANCELLED only CREATED;
+ *  - PICKED_UP / IN_TRANSIT need an active assignment;
+ *  - DELIVERED needs proof of delivery on file.
+ */
+function overrideTargetsFor(status: string, hasActiveAssignment: boolean, podCount: number): DeliveryStatus[] {
+  if (!status) return [];
+  if (status === "DELIVERED") return ["CREATED", "FAILED"];
+  if (status === "CANCELLED") return ["CREATED"];
+  return OVERRIDE_TARGETS.filter((s) => {
+    if (s === status) return false;
+    if ((s === "PICKED_UP" || s === "IN_TRANSIT") && !hasActiveAssignment) return false;
+    if (s === "DELIVERED" && podCount === 0) return false;
+    return true;
+  });
+}
+
+const OUTCOME_STYLES: Record<string, string> = {
+  DELIVERED: "border-emerald-200 bg-emerald-100 text-emerald-800 dark:border-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300",
+  FAILED: "border-rose-200 bg-rose-100 text-rose-800 dark:border-rose-800 dark:bg-rose-950/60 dark:text-rose-300",
+  CANCELLED: "border-zinc-200 bg-zinc-100 text-zinc-600 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300",
+  UNASSIGNED: "border-amber-200 bg-amber-100 text-amber-800 dark:border-amber-800 dark:bg-amber-950/60 dark:text-amber-300",
+  ACTIVE: "border-teal-200 bg-teal-100 text-teal-800 dark:border-teal-800 dark:bg-teal-950/60 dark:text-teal-300",
+};
+
+function outcomeLabel(a: AssignmentHistoryItem): string {
+  if (a.active) return "Active";
+  if (a.outcome === "UNASSIGNED") return "Unassigned";
+  if (a.outcome) return STATUS_LABELS[a.outcome as DeliveryStatus] ?? a.outcome;
+  return "Ended";
+}
+
 const EVENT_CIRCLE_STYLES: Record<string, string> = {
   CREATED: "bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300",
   ASSIGNED: "bg-teal-100 text-teal-700 dark:bg-teal-950/60 dark:text-teal-300",
@@ -99,13 +134,14 @@ export function DeliveryDetailDialog({
   open: boolean;
   onOpenChange: (o: boolean) => void;
 }) {
-  const { data, loading, error, reload } = useApiData<DeliveryDetail>(
+  const { data, loading, error } = useApiData<DeliveryDetail>(
     open && deliveryId ? `/api/deliveries/${deliveryId}` : null,
   );
 
   const [busy, setBusy] = useState(false);
 
   // Sub-dialog state (cleaned up on close so nothing leaks between rows)
+  const [editOpen, setEditOpen] = useState(false);
   const [assignOpen, setAssignOpen] = useState(false);
   const [unassignOpen, setUnassignOpen] = useState(false);
   const [unassignReason, setUnassignReason] = useState("");
@@ -130,22 +166,26 @@ export function DeliveryDetailDialog({
     (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
   );
   const pods = data?.pods ?? [];
+  const assignments = [...(data?.assignments ?? [])].sort(
+    (a, b) => new Date(b.assignedAt).getTime() - new Date(a.assignedAt).getTime(),
+  );
   const trackingUrl = delivery?.trackingToken
     ? `${typeof window === "undefined" ? "" : window.location.origin}/?track=${delivery.trackingToken}`
     : "";
 
-  const showSkeleton = loading || !data;
+  // Skeleton only before the first answer; keep content visible while refetching.
+  const showSkeleton = !data && !error;
 
   // ── helpers ───────────────────────────────────────────────
 
+  /** Run a mutation; `after` runs before the global refresh (bump refetches this dialog too). */
   async function runMutation(fn: () => Promise<unknown>, success: string, after?: () => void) {
     setBusy(true);
     try {
       await fn();
       toast.success(success);
-      useAppStore.getState().bump();
-      await reload();
       after?.();
+      useAppStore.getState().bump();
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Something went wrong");
     } finally {
@@ -154,6 +194,7 @@ export function DeliveryDetailDialog({
   }
 
   function closeAll() {
+    setEditOpen(false);
     setAssignOpen(false);
     setUnassignOpen(false);
     setUnassignReason("");
@@ -235,7 +276,8 @@ export function DeliveryDetailDialog({
   function handleOverride() {
     if (!deliveryId) return;
     const errs = {
-      status: !overrideStatus,
+      // The delivery may have moved on since the target was picked.
+      status: !overrideTargets.includes(overrideStatus as DeliveryStatus),
       reason: !overrideReason.trim(),
       failure: overrideStatus === "FAILED" && !overrideFailure,
     };
@@ -294,13 +336,15 @@ export function DeliveryDetailDialog({
 
   const canAssign = status === "CREATED" || status === "FAILED";
   const canUnassign = status === "ASSIGNED" || status === "PICKED_UP" || status === "IN_TRANSIT";
-  const overrideTargets = OVERRIDE_TARGETS.filter((s) => s !== status);
+  const canEdit = !!delivery && status !== "DELIVERED" && status !== "CANCELLED";
+  const canDelete = status === "CREATED" && !!data && data.assignments.length === 0;
+  const overrideTargets = overrideTargetsFor(status, !!delivery?.assignment, pods.length);
 
   // ── render ────────────────────────────────────────────────
 
   return (
     <Dialog open={open} onOpenChange={handleMainOpenChange}>
-        <DialogContent className="max-h-[85vh] gap-4 overflow-y-auto sm:max-w-xl lg:max-w-2xl" aria-describedby={undefined}>
+        <DialogContent className="max-h-[85vh] gap-4 overflow-y-auto sm:max-w-xl lg:max-w-2xl" aria-busy={loading}>
           <DialogHeader className="pr-6">
             <DialogTitle className="flex flex-wrap items-center gap-2">
               {delivery ? (
@@ -333,12 +377,24 @@ export function DeliveryDetailDialog({
               <Skeleton className="h-16 w-full" />
               <Skeleton className="h-40 w-full" />
             </div>
-          ) : error ? (
-            <div className="rounded-lg border border-destructive/30 bg-destructive/5 p-4 text-sm text-destructive">
+          ) : error && !data ? (
+            <div
+              role="alert"
+              className="rounded-lg border border-destructive/30 bg-destructive/5 p-4 text-sm text-destructive"
+            >
               Couldn&apos;t load this delivery: {error}
             </div>
           ) : delivery ? (
             <div className="space-y-4">
+              {error ? (
+                <div
+                  role="alert"
+                  className="rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive"
+                >
+                  Couldn&apos;t refresh — showing the last loaded details. {error}
+                </div>
+              ) : null}
+
               {/* Info grid */}
               <dl className="grid gap-4 text-sm sm:grid-cols-2">
                 <Field label="Recipient">
@@ -352,6 +408,22 @@ export function DeliveryDetailDialog({
                     {delivery.recipientPhone}
                   </a>
                 </Field>
+                {delivery.externalRef ? (
+                  <Field label="Order reference">
+                    <span className="font-mono">{delivery.externalRef}</span>
+                  </Field>
+                ) : null}
+                {delivery.recipientEmail ? (
+                  <Field label="Customer email">
+                    <a
+                      href={`mailto:${delivery.recipientEmail}`}
+                      className="text-primary hover:underline"
+                      aria-label={`Email ${delivery.recipientName} at ${delivery.recipientEmail}`}
+                    >
+                      {delivery.recipientEmail}
+                    </a>
+                  </Field>
+                ) : null}
                 <Field label="Pickup address">{delivery.pickupAddress}</Field>
                 <Field label="Delivery address">{delivery.deliveryAddress}</Field>
                 <Field label="Expected">{friendlyDueDate(delivery.expectedAt)}</Field>
@@ -393,11 +465,53 @@ export function DeliveryDetailDialog({
                 )}
               </div>
 
+              {/* Assignment history */}
+              {assignments.length > 0 ? (
+                <div className="rounded-lg border p-4">
+                  <p className="mb-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                    Assignment history · {assignments.length}
+                  </p>
+                  <ul className="divide-y text-sm">
+                    {assignments.map((a) => {
+                      const endedAt = a.completedAt ?? a.unassignedAt;
+                      return (
+                        <li key={a.id} className="flex flex-wrap items-center gap-x-2 gap-y-1 py-2 first:pt-0 last:pb-0">
+                          <span className="font-medium">{a.driverName}</span>
+                          <span className="text-muted-foreground">·</span>
+                          <span className="font-mono text-xs">{a.vehicleRegistration}</span>
+                          <span className="text-xs text-muted-foreground">
+                            (<VehicleTypeLabel type={a.vehicleType} />)
+                          </span>
+                          <Badge
+                            variant="outline"
+                            className={cn(
+                              "ml-auto",
+                              OUTCOME_STYLES[a.active ? "ACTIVE" : (a.outcome ?? "")] ?? "bg-muted text-muted-foreground",
+                            )}
+                          >
+                            {outcomeLabel(a)}
+                          </Badge>
+                          <span className="basis-full text-xs text-muted-foreground">
+                            Assigned {formatDateTime(a.assignedAt)}
+                            {endedAt ? ` → ended ${formatDateTime(endedAt)}` : a.active ? " · in progress" : ""}
+                          </span>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                </div>
+              ) : null}
+
               {/* Actions */}
               <div className="flex flex-wrap gap-2">
                 {canAssign ? (
                   <Button className="min-h-11 sm:min-h-9" onClick={() => setAssignOpen(true)}>
                     <UserCheck /> Assign driver &amp; vehicle
+                  </Button>
+                ) : null}
+                {canEdit ? (
+                  <Button variant="outline" className="min-h-11 sm:min-h-9" onClick={() => setEditOpen(true)}>
+                    <Pencil /> Edit details
                   </Button>
                 ) : null}
                 {canUnassign ? (
@@ -421,14 +535,16 @@ export function DeliveryDetailDialog({
                 <Button variant="outline" className="min-h-11 sm:min-h-9" onClick={() => setNoteOpen(true)}>
                   <StickyNote /> Add note
                 </Button>
-                <Button
-                  variant="outline"
-                  className="min-h-11 border-amber-500/40 text-amber-600 hover:bg-amber-500/10 hover:text-amber-700 sm:min-h-9 dark:text-amber-400 dark:hover:text-amber-300"
-                  onClick={() => setOverrideOpen(true)}
-                >
-                  <ShieldAlert /> Override (audited)
-                </Button>
-                {status === "CREATED" ? (
+                {overrideTargets.length > 0 ? (
+                  <Button
+                    variant="outline"
+                    className="min-h-11 border-amber-500/40 text-amber-600 hover:bg-amber-500/10 hover:text-amber-700 sm:min-h-9 dark:text-amber-400 dark:hover:text-amber-300"
+                    onClick={() => setOverrideOpen(true)}
+                  >
+                    <ShieldAlert /> Override (audited)
+                  </Button>
+                ) : null}
+                {canDelete ? (
                   <Button
                     variant="ghost"
                     className="min-h-11 text-destructive hover:bg-destructive/10 hover:text-destructive sm:min-h-9"
@@ -536,7 +652,6 @@ export function DeliveryDetailDialog({
                         onClick={() => setPodPreview(pod)}
                         aria-label={`View ${pod.kind === "SIGNATURE" ? "signature" : "photo"} proof from ${pod.recipientName}`}
                       >
-                        { }
                         <img
                           src={`/api/pod/${pod.id}`}
                           alt={`${pod.kind === "SIGNATURE" ? "Signature" : "Photo"} proof of delivery — ${pod.recipientName}`}
@@ -630,6 +745,8 @@ export function DeliveryDetailDialog({
 
           <AssignDialog delivery={delivery} open={assignOpen} onOpenChange={setAssignOpen} />
 
+          {delivery ? <DeliveryFormDialog delivery={delivery} open={editOpen} onOpenChange={setEditOpen} /> : null}
+
           {/* Unassign */}
           <AlertDialog
             open={unassignOpen}
@@ -652,6 +769,7 @@ export function DeliveryDetailDialog({
                   id="unassign-reason"
                   value={unassignReason}
                   onChange={(e) => setUnassignReason(e.target.value)}
+                  maxLength={300}
                   placeholder="e.g. Vehicle breakdown, driver shift ended"
                 />
               </div>
@@ -702,6 +820,7 @@ export function DeliveryDetailDialog({
                     if (e.target.value.trim()) setCancelError(false);
                   }}
                   aria-invalid={cancelError}
+                  maxLength={500}
                   placeholder="e.g. Duplicate order, customer request"
                   className={cn("min-h-11 sm:min-h-9", cancelError && "border-destructive focus-visible:ring-destructive/30")}
                 />
@@ -735,7 +854,7 @@ export function DeliveryDetailDialog({
               }
             }}
           >
-            <DialogContent className="sm:max-w-md" aria-describedby={undefined}>
+            <DialogContent className="sm:max-w-md">
               <DialogHeader>
                 <DialogTitle>Add note</DialogTitle>
                 <DialogDescription>
@@ -754,6 +873,7 @@ export function DeliveryDetailDialog({
                     if (e.target.value.trim()) setNoteError(false);
                   }}
                   aria-invalid={noteError}
+                  maxLength={500}
                   placeholder="e.g. Customer requested delivery after 2 PM"
                   className={cn(noteError && "border-destructive focus-visible:ring-destructive/30")}
                 />
@@ -794,7 +914,7 @@ export function DeliveryDetailDialog({
               }
             }}
           >
-            <DialogContent className="sm:max-w-md" aria-describedby={undefined}>
+            <DialogContent className="sm:max-w-md">
               <DialogHeader>
                 <DialogTitle className="flex items-center gap-2">
                   <ShieldAlert className="size-5 text-amber-600 dark:text-amber-400" />
@@ -872,6 +992,7 @@ export function DeliveryDetailDialog({
                       if (e.target.value.trim()) setOverrideErrors((er) => ({ ...er, reason: false }));
                     }}
                     aria-invalid={overrideErrors.reason}
+                    maxLength={500}
                     placeholder="e.g. Confirmed by phone — driver forgot to scan"
                     className={cn(overrideErrors.reason && "border-destructive focus-visible:ring-destructive/30")}
                   />
@@ -928,7 +1049,7 @@ export function DeliveryDetailDialog({
               if (!o) setPodPreview(null);
             }}
           >
-            <DialogContent className="sm:max-w-lg" aria-describedby={undefined}>
+            <DialogContent className="sm:max-w-lg">
               <DialogHeader className="pr-6">
                 <DialogTitle className="flex items-center gap-2">
                   {podPreview?.kind === "SIGNATURE" ? (

@@ -1,17 +1,24 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { format } from "date-fns";
+import { toast } from "sonner";
 import {
   AlertTriangle,
   CheckCircle2,
+  CircleDashed,
   Clock,
   Download,
   Filter,
+  Info,
+  Loader2,
   Package,
+  PackageCheck,
   RotateCcw,
+  Route,
   Timer,
   TrendingUp,
+  Truck,
+  Users,
   type LucideIcon,
 } from "lucide-react";
 import {
@@ -32,10 +39,19 @@ import { Button } from "@/components/ui/button";
 import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { useApiData } from "@/lib/api-client";
+import { api, useApiData } from "@/lib/api-client";
+import {
+  CHART_TOOLTIP_STYLE,
+  dayTick,
+  dayTooltipLabel,
+  isRangeInverted,
+  rangeFromParam,
+  rangeToParam,
+} from "@/components/fleetflow/date-range";
 import {
   DELIVERY_STATUSES,
   PRIORITIES,
@@ -75,6 +91,86 @@ interface ReportFilters {
 const EMPTY_FILTERS: ReportFilters = { from: "", to: "", driverId: "", vehicleId: "", status: "", priority: "" };
 const FILTER_KEYS = Object.keys(EMPTY_FILTERS) as (keyof ReportFilters)[];
 
+/** Timeliness of a delivered row (see src/lib/report-metrics.ts → classifyTimeliness). */
+const TIMELINESS: Record<string, { label: string; className: string }> = {
+  ON_TIME: { label: "On time", className: "font-medium text-emerald-600 dark:text-emerald-400" },
+  LATE: { label: "Late", className: "font-medium text-amber-600 dark:text-amber-400" },
+  NO_DEADLINE: { label: "No deadline", className: "text-muted-foreground" },
+  NO_COMPLETION_TIME: { label: "No completion time", className: "text-muted-foreground" },
+};
+
+// ── Formatting ───────────────────────────────────────────────
+
+const pct = (n: number | null | undefined) => (n == null ? "—" : `${n}%`);
+const hrs = (n: number | null | undefined) => (n == null ? "—" : `${n.toFixed(1)} h`);
+const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
+
+// ── Metric definitions (mirror src/lib/report-metrics.ts) ────
+
+const METRIC_DEFINITIONS: { term: string; definition: string }[] = [
+  {
+    term: "Total",
+    definition:
+      "Deliveries created in the selected date range that match the filters. Status counts use each delivery's current status.",
+  },
+  {
+    term: "Pending dispatch / In progress",
+    definition: "Pending dispatch = created but not yet assigned. In progress = assigned, picked up or in transit.",
+  },
+  {
+    term: "Success rate",
+    definition:
+      "Delivered ÷ (delivered + failed). Cancelled and still-open deliveries are left out. Shown as — when nothing has been delivered or failed yet.",
+  },
+  {
+    term: "On-time rate",
+    definition:
+      "Deliveries completed on or before their expected time ÷ delivered deliveries that have an expected time. Deliveries without a deadline are excluded — they are never counted as on time.",
+  },
+  { term: "Late", definition: "Delivered after the expected time." },
+  {
+    term: "Avg completion",
+    definition:
+      "Mean (and median) hours from creation to delivery, over delivered deliveries. Rows with a missing timestamp are excluded and counted.",
+  },
+  {
+    term: "Time on the road",
+    definition:
+      "Hours from assignment to delivery for the driver who delivered it. Rows with a missing timestamp are excluded and counted.",
+  },
+  {
+    term: "Per driver",
+    definition:
+      "Assigned = distinct deliveries ever given to the driver. Delivered / Failed = the driver's assignments that ended that way (each failed attempt counts). Failure % = failed ÷ (delivered + failed). On-time % uses the same deadline rule over the deliveries that driver completed.",
+  },
+];
+
+function MetricDefinitions() {
+  return (
+    <Popover>
+      <PopoverTrigger asChild>
+        <Button variant="ghost" size="sm" className="h-8 text-muted-foreground">
+          <Info className="size-4" aria-hidden="true" /> How metrics are calculated
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent align="end" className="w-[min(92vw,440px)]">
+        <p className="text-sm font-semibold">How metrics are calculated</p>
+        <dl className={cn("mt-3 flex max-h-[60vh] flex-col gap-2.5 overflow-y-auto pr-1", SCROLLBAR)}>
+          {METRIC_DEFINITIONS.map((m) => (
+            <div key={m.term}>
+              <dt className="text-xs font-medium">{m.term}</dt>
+              <dd className="text-xs leading-relaxed text-muted-foreground">{m.definition}</dd>
+            </div>
+          ))}
+        </dl>
+        <p className="mt-3 border-t pt-2 text-[11px] text-muted-foreground">
+          Rates are whole percentages; durations are rounded to 0.1 h. Dates use the report&apos;s date range (creation date).
+        </p>
+      </PopoverContent>
+    </Popover>
+  );
+}
+
 // ── Small building blocks ────────────────────────────────────
 
 type Tone = "emerald" | "amber" | "rose" | "teal" | "zinc";
@@ -106,7 +202,9 @@ function SummaryCard({
         <div className="min-w-0">
           <p className="truncate text-xs font-medium text-muted-foreground">{label}</p>
           <p className="mt-1.5 text-2xl font-semibold tracking-tight tabular-nums">{value}</p>
-          <p className="mt-1 truncate text-xs text-muted-foreground">{hint}</p>
+          <p className="mt-1 truncate text-xs text-muted-foreground" title={hint}>
+            {hint}
+          </p>
         </div>
         <div className={cn("flex size-10 shrink-0 items-center justify-center rounded-lg", TONE_STYLES[tone])}>
           <Icon className="size-5" aria-hidden="true" />
@@ -116,18 +214,40 @@ function SummaryCard({
   );
 }
 
-function dayTick(value: unknown): string {
-  const d = new Date(String(value));
-  return Number.isNaN(d.getTime()) ? String(value) : format(d, "d MMM");
-}
-
-function dayTooltipLabel(label: unknown): string {
-  const d = new Date(String(label));
-  return Number.isNaN(d.getTime()) ? String(label) : format(d, "EEE d MMM yyyy");
-}
-
-function onTimePct(completed: number, late: number): number | null {
-  return completed > 0 ? Math.round(((completed - late) / completed) * 100) : null;
+function FailureReasons({ rows, failed }: { rows: ReportData["failureReasons"]; failed: number }) {
+  const max = Math.max(1, ...rows.map((r) => r.count));
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-base">Failure reasons</CardTitle>
+        <CardDescription className="text-xs">
+          {failed === 0 ? "Deliveries currently failed, by reason" : `${plural(failed, "delivery", "deliveries")} currently failed, by reason`}
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        {rows.length === 0 ? (
+          <div className="flex h-[200px] items-center justify-center text-sm text-muted-foreground">No failed deliveries in this range.</div>
+        ) : (
+          <ul className="flex flex-col gap-3">
+            {rows.map((r) => (
+              <li key={r.reason} className="flex flex-col gap-1.5">
+                <div className="flex items-baseline justify-between gap-3 text-sm">
+                  <span className="truncate">{r.label}</span>
+                  <span className="shrink-0 tabular-nums text-muted-foreground">
+                    <span className="font-medium text-foreground">{r.count}</span>
+                    {failed > 0 ? ` · ${Math.round((r.count / failed) * 100)}%` : ""}
+                  </span>
+                </div>
+                <div className="h-1.5 w-full overflow-hidden rounded-full bg-muted" aria-hidden="true">
+                  <div className="h-full rounded-full bg-rose-500/80" style={{ width: `${(r.count / max) * 100}%` }} />
+                </div>
+              </li>
+            ))}
+          </ul>
+        )}
+      </CardContent>
+    </Card>
+  );
 }
 
 // ── Filter field wrapper ─────────────────────────────────────
@@ -157,26 +277,50 @@ export default function ReportsView() {
   const [filters, setFilters] = useState<ReportFilters>(EMPTY_FILTERS);
   const [applied, setApplied] = useState<ReportFilters>(EMPTY_FILTERS);
 
+  const [rangeError, setRangeError] = useState<string | null>(null);
+  const [exporting, setExporting] = useState(false);
+
   const appliedUrl = useMemo(() => {
     const params = new URLSearchParams();
     for (const key of FILTER_KEYS) {
       const value = applied[key];
-      if (value) params.set(key, value);
+      if (!value) continue;
+      // Dates go out as instants in the viewer's local time: from inclusive, to exclusive.
+      if (key === "from") {
+        const from = rangeFromParam(value);
+        if (from) params.set("from", from);
+      } else if (key === "to") {
+        const to = rangeToParam(value);
+        if (to) params.set("to", to);
+      } else {
+        params.set(key, value);
+      }
     }
-    const qs = params.toString();
-    return qs ? `/api/reports?${qs}` : "/api/reports";
+    params.set("tz", String(new Date().getTimezoneOffset()));
+    return `/api/reports?${params.toString()}`;
   }, [applied]);
 
   const { data, loading, error } = useApiData<ReportData>(appliedUrl);
   const driversQ = useApiData<{ items: DriverItem[] }>("/api/drivers");
   const vehiclesQ = useApiData<{ items: VehicleItem[] }>("/api/vehicles");
 
-  const setFilter = (key: keyof ReportFilters, value: string) => setFilters((f) => ({ ...f, [key]: value }));
+  const setFilter = (key: keyof ReportFilters, value: string) => {
+    setFilters((f) => ({ ...f, [key]: value }));
+    if (key === "from" || key === "to") setRangeError(null);
+  };
 
-  const handleApply = () => setApplied(filters);
+  const handleApply = () => {
+    if (isRangeInverted(filters.from, filters.to)) {
+      setRangeError("“From” must be on or before “To”.");
+      return;
+    }
+    setRangeError(null);
+    setApplied(filters);
+  };
   const handleReset = () => {
     setFilters(EMPTY_FILTERS);
     setApplied(EMPTY_FILTERS);
+    setRangeError(null);
   };
 
   const activeCount = FILTER_KEYS.filter((k) => applied[k]).length;
@@ -184,23 +328,33 @@ export default function ReportsView() {
 
   const summary = data?.summary;
   const daily = data?.daily ?? [];
-  const driverRows = data?.driverBreakdown ?? [];
+  const driverRows = useMemo(() => data?.driverBreakdown ?? [], [data]);
   const items = data?.items ?? [];
+  const itemsTotal = data?.itemsTotal ?? items.length;
 
   const bestOnTime = useMemo(() => {
     let best: number | null = null;
     for (const row of driverRows) {
-      const pct = onTimePct(row.completed, row.late);
-      if (pct != null && (best == null || pct > best)) best = pct;
+      if (row.onTimeRate != null && (best == null || row.onTimeRate > best)) best = row.onTimeRate;
     }
     return best;
   }, [driverRows]);
 
-  const handleExport = () => {
-    if (!data) return;
+  // Export re-fetches the applied report with export=1 so every matching row is included.
+  const handleExport = async () => {
+    if (!data || exporting) return;
+    setExporting(true);
+    let full: ReportData;
+    try {
+      full = await api.get<ReportData>(`${appliedUrl}&export=1`);
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Export failed");
+      setExporting(false);
+      return;
+    }
     const rows: (string | number | null)[][] = [
-      ["Tracking", "Recipient", "Driver", "Vehicle", "Status", "Priority", "Created", "Expected", "Completed", "Late", "Failure reason"],
-      ...data.items.map((it) => [
+      ["Tracking", "Recipient", "Driver", "Vehicle", "Status", "Priority", "Created", "Expected", "Completed", "Timeliness", "Failure reason"],
+      ...full.items.map((it) => [
         it.trackingCode,
         it.recipientName,
         it.driverName ?? "",
@@ -210,11 +364,48 @@ export default function ReportsView() {
         it.createdAt ? formatDate(it.createdAt) : "",
         it.expectedAt ? formatDateTime(it.expectedAt) : "",
         it.completedAt ? formatDateTime(it.completedAt) : "",
-        it.status === "DELIVERED" ? (it.isLate ? "Late" : "On time") : "",
+        it.timeliness ? (TIMELINESS[it.timeliness]?.label ?? it.timeliness) : "",
         it.status === "FAILED" ? failureReasonLabel(it.failureReason) : "",
       ]),
     ];
     downloadCsv("fleetflow-report.csv", rows);
+    toast.success(`Exported ${full.items.length} ${full.items.length === 1 ? "delivery" : "deliveries"}`);
+    setExporting(false);
+  };
+
+  // The driver breakdown is never capped, so it exports straight from the loaded report.
+  const handleDriverExport = () => {
+    if (driverRows.length === 0) return;
+    const rows: (string | number | null)[][] = [
+      [
+        "Driver",
+        "Assigned (deliveries)",
+        "Delivered",
+        "Failed attempts",
+        "Failure rate %",
+        "On time",
+        "Late",
+        "Delivered without deadline (excluded from on-time)",
+        "On-time rate %",
+        "Avg time on the road (h)",
+        "Excluded from road time (missing timestamps)",
+      ],
+      ...driverRows.map((r) => [
+        r.driverName,
+        r.assigned,
+        r.delivered,
+        r.failed,
+        r.failureRate ?? "",
+        r.onTime,
+        r.late,
+        r.deliveredWithoutDeadline,
+        r.onTimeRate ?? "",
+        r.avgRoadHours ?? "",
+        r.roadTimeExcluded,
+      ]),
+    ];
+    downloadCsv("fleetflow-driver-performance.csv", rows);
+    toast.success(`Exported ${plural(driverRows.length, "driver", "drivers")}`);
   };
 
   return (
@@ -232,7 +423,10 @@ export default function ReportsView() {
                 id="rep-from"
                 type="date"
                 value={filters.from}
+                max={filters.to || undefined}
                 onChange={(e) => setFilter("from", e.target.value)}
+                aria-invalid={!!rangeError}
+                aria-describedby={rangeError ? "rep-range-error" : undefined}
                 className="bg-background"
               />
             </FilterField>
@@ -241,7 +435,10 @@ export default function ReportsView() {
                 id="rep-to"
                 type="date"
                 value={filters.to}
+                min={filters.from || undefined}
                 onChange={(e) => setFilter("to", e.target.value)}
+                aria-invalid={!!rangeError}
+                aria-describedby={rangeError ? "rep-range-error" : undefined}
                 className="bg-background"
               />
             </FilterField>
@@ -307,6 +504,12 @@ export default function ReportsView() {
             </FilterField>
           </div>
 
+          {rangeError ? (
+            <p id="rep-range-error" role="alert" className="text-sm text-destructive">
+              {rangeError}
+            </p>
+          ) : null}
+
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
               <span>{activeCount === 0 ? "No filters applied" : `${activeCount} filter${activeCount === 1 ? "" : "s"} applied`}</span>
@@ -337,8 +540,8 @@ export default function ReportsView() {
         </Alert>
       ) : !data ? (
         <div className="flex flex-col gap-6" aria-busy="true">
-          <div className="grid grid-cols-2 gap-4 md:grid-cols-3 xl:grid-cols-6">
-            {Array.from({ length: 6 }).map((_, i) => (
+          <div className="grid grid-cols-2 gap-4 md:grid-cols-3 xl:grid-cols-5">
+            {Array.from({ length: 10 }).map((_, i) => (
               <Card key={i} className="gap-0">
                 <CardContent className="flex flex-col gap-3">
                   <Skeleton className="h-4 w-24" />
@@ -348,60 +551,104 @@ export default function ReportsView() {
               </Card>
             ))}
           </div>
-          <Card>
-            <CardContent>
-              <Skeleton className="h-[308px] w-full" />
-            </CardContent>
-          </Card>
-          <div className="grid gap-4 xl:grid-cols-2">
-            <Card>
+          <div className="grid gap-4 xl:grid-cols-3">
+            <Card className="xl:col-span-2">
               <CardContent>
-                <Skeleton className="h-64 w-full" />
+                <Skeleton className="h-[308px] w-full" />
               </CardContent>
             </Card>
             <Card>
               <CardContent>
-                <Skeleton className="h-64 w-full" />
+                <Skeleton className="h-[308px] w-full" />
               </CardContent>
             </Card>
           </div>
+          <Card>
+            <CardContent>
+              <Skeleton className="h-64 w-full" />
+            </CardContent>
+          </Card>
         </div>
       ) : (
         <div className={cn("flex flex-col gap-6 transition-opacity", loading && "pointer-events-none opacity-60")} aria-busy={loading}>
           {/* Summary cards */}
-          <section aria-label="Report summary" className="grid grid-cols-2 gap-4 md:grid-cols-3 xl:grid-cols-6">
-            <SummaryCard icon={Package} tone="emerald" label="Total deliveries" value={String(summary?.total ?? 0)} hint="in selected range" />
-            <SummaryCard
-              icon={CheckCircle2}
-              tone="emerald"
-              label="Completion rate"
-              value={summary?.completionRate == null ? "—" : `${summary.completionRate}%`}
-              hint="delivered vs considered"
-            />
-            <SummaryCard
-              icon={TrendingUp}
-              tone="teal"
-              label="On-time rate"
-              value={summary?.onTimeRate == null ? "—" : `${summary.onTimeRate}%`}
-              hint="of completed deliveries"
-            />
-            <SummaryCard icon={Clock} tone="amber" label="Late deliveries" value={String(summary?.lateCount ?? 0)} hint="delivered after deadline" />
-            <SummaryCard icon={AlertTriangle} tone="rose" label="Failed" value={String(summary?.failed ?? 0)} hint="unsuccessful attempts" />
-            <SummaryCard
-              icon={Timer}
-              tone="zinc"
-              label="Avg completion"
-              value={summary?.avgCompletionHours == null ? "—" : `${summary.avgCompletionHours.toFixed(1)} h`}
-              hint="created → delivered"
-            />
+          <section aria-labelledby="rep-summary-title" className="flex flex-col gap-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <h2 id="rep-summary-title" className="text-sm font-medium text-muted-foreground">
+                Summary
+              </h2>
+              <MetricDefinitions />
+            </div>
+            <div className="grid grid-cols-2 gap-4 md:grid-cols-3 xl:grid-cols-5">
+              <SummaryCard icon={Package} tone="zinc" label="Total deliveries" value={String(summary?.total ?? 0)} hint="created in selected range" />
+              <SummaryCard
+                icon={PackageCheck}
+                tone="emerald"
+                label="Delivered"
+                value={String(summary?.completed ?? 0)}
+                hint={`${summary?.cancelled ?? 0} cancelled`}
+              />
+              <SummaryCard
+                icon={CircleDashed}
+                tone="zinc"
+                label="Pending dispatch"
+                value={String(summary?.pendingDispatch ?? 0)}
+                hint="created, not yet assigned"
+              />
+              <SummaryCard
+                icon={Truck}
+                tone="teal"
+                label="In progress"
+                value={String(summary?.inProgress ?? 0)}
+                hint="assigned · picked up · in transit"
+              />
+              <SummaryCard icon={AlertTriangle} tone="rose" label="Failed" value={String(summary?.failed ?? 0)} hint="currently failed" />
+              <SummaryCard
+                icon={CheckCircle2}
+                tone="emerald"
+                label="Success rate"
+                value={pct(summary?.successRate)}
+                hint="delivered ÷ (delivered + failed)"
+              />
+              <SummaryCard
+                icon={TrendingUp}
+                tone="teal"
+                label="On-time rate"
+                value={pct(summary?.onTimeRate)}
+                hint={
+                  summary?.deliveredWithoutDeadline
+                    ? `${summary.deliveredWithoutDeadline} delivered without a deadline — excluded`
+                    : "of delivered with a deadline"
+                }
+              />
+              <SummaryCard icon={Clock} tone="amber" label="Late deliveries" value={String(summary?.lateCount ?? 0)} hint="delivered after deadline" />
+              <SummaryCard
+                icon={Timer}
+                tone="zinc"
+                label="Avg completion"
+                value={hrs(summary?.avgCompletionHours)}
+                hint={`median ${hrs(summary?.medianCompletionHours)} · ${
+                  summary?.completionTimeExcluded ? `${summary.completionTimeExcluded} excluded` : "created → delivered"
+                }`}
+              />
+              <SummaryCard
+                icon={Route}
+                tone="zinc"
+                label="Time on the road"
+                value={hrs(summary?.avgRoadHours)}
+                hint={`median ${hrs(summary?.medianRoadHours)} · ${
+                  summary?.roadTimeExcluded ? `${summary.roadTimeExcluded} excluded` : "assigned → delivered"
+                }`}
+              />
+            </div>
           </section>
 
-          {/* Daily volume + driver performance */}
-          <section aria-label="Charts and driver performance" className="grid gap-4 xl:grid-cols-2">
-            <Card>
+          {/* Daily volume + failure reasons */}
+          <section aria-label="Daily volume and failure reasons" className="grid gap-4 xl:grid-cols-3">
+            <Card className="xl:col-span-2">
               <CardHeader>
                 <CardTitle className="text-base">Daily volume</CardTitle>
-                <CardDescription className="text-xs">Completed, failed and total deliveries per day</CardDescription>
+                <CardDescription className="text-xs">Deliveries created per day, by their current status</CardDescription>
               </CardHeader>
               <CardContent>
                 {daily.length === 0 ? (
@@ -432,13 +679,14 @@ export default function ReportsView() {
                       />
                       <Tooltip
                         cursor={{ stroke: "rgba(113,113,122,0.35)", strokeDasharray: "3 3" }}
-                        contentStyle={{ borderRadius: 8, fontSize: 12 }}
+                        contentStyle={CHART_TOOLTIP_STYLE.contentStyle}
+                        labelStyle={CHART_TOOLTIP_STYLE.labelStyle}
                         labelFormatter={dayTooltipLabel}
                       />
                       <Legend iconType="circle" iconSize={8} wrapperStyle={{ fontSize: 12 }} />
                       <Area
                         dataKey="completed"
-                        name="Completed"
+                        name="Delivered"
                         stroke={COLORS.emerald}
                         fill={COLORS.emerald}
                         fillOpacity={0.12}
@@ -452,63 +700,86 @@ export default function ReportsView() {
               </CardContent>
             </Card>
 
-            <Card>
-              <CardHeader>
-                <CardTitle className="text-base">Driver performance</CardTitle>
-                <CardDescription className="text-xs">Assigned, completed, failed and late jobs per driver</CardDescription>
-              </CardHeader>
-              <CardContent>
-                <Table>
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead>Driver</TableHead>
-                      <TableHead className="text-right">Assigned</TableHead>
-                      <TableHead className="text-right">Completed</TableHead>
-                      <TableHead className="text-right">Failed</TableHead>
-                      <TableHead className="text-right">Late</TableHead>
-                      <TableHead className="text-right">On-time %</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {driverRows.length === 0 ? (
-                      <TableRow>
-                        <TableCell colSpan={6} className="h-20 text-center text-muted-foreground">
-                          No driver activity in this range.
-                        </TableCell>
-                      </TableRow>
-                    ) : (
-                      driverRows.map((row) => {
-                        const pct = onTimePct(row.completed, row.late);
-                        const isBest = pct != null && pct === bestOnTime;
-                        return (
-                          <TableRow key={row.driverId}>
-                            <TableCell className="max-w-[140px] truncate font-medium">{row.driverName}</TableCell>
-                            <TableCell className="text-right tabular-nums">{row.total}</TableCell>
-                            <TableCell className="text-right tabular-nums">{row.completed}</TableCell>
-                            <TableCell className={cn("text-right tabular-nums", row.failed > 0 && "text-rose-600 dark:text-rose-400")}>
-                              {row.failed}
-                            </TableCell>
-                            <TableCell className={cn("text-right tabular-nums", row.late > 0 && "text-amber-600 dark:text-amber-400")}>
-                              {row.late}
-                            </TableCell>
-                            <TableCell
-                              className={cn(
-                                "text-right font-medium tabular-nums",
-                                isBest ? "text-emerald-600 dark:text-emerald-400" : "text-muted-foreground"
-                              )}
-                              title={isBest ? "Best on-time rate" : undefined}
-                            >
-                              {pct == null ? "—" : `${pct}%`}
-                            </TableCell>
-                          </TableRow>
-                        );
-                      })
-                    )}
-                  </TableBody>
-                </Table>
-              </CardContent>
-            </Card>
+            <FailureReasons rows={data.failureReasons ?? []} failed={summary?.failed ?? 0} />
           </section>
+
+          {/* Driver performance */}
+          <Card>
+            <CardHeader>
+              <div>
+                <CardTitle className="text-base">Driver performance</CardTitle>
+                <CardDescription className="text-xs">
+                  Results credited to the driver who held each job · on-time % counts only deliveries with a deadline
+                </CardDescription>
+              </div>
+              <CardAction>
+                <Button variant="outline" size="sm" onClick={handleDriverExport} disabled={driverRows.length === 0 || loading}>
+                  <Users className="size-4" aria-hidden="true" /> Export drivers CSV
+                </Button>
+              </CardAction>
+            </CardHeader>
+            <CardContent>
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Driver</TableHead>
+                    <TableHead className="text-right">Assigned</TableHead>
+                    <TableHead className="text-right">Delivered</TableHead>
+                    <TableHead className="text-right">Failed</TableHead>
+                    <TableHead className="text-right">Failure %</TableHead>
+                    <TableHead className="text-right">Late</TableHead>
+                    <TableHead className="text-right">On-time %</TableHead>
+                    <TableHead className="text-right">Avg on road</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {driverRows.length === 0 ? (
+                    <TableRow>
+                      <TableCell colSpan={8} className="h-20 text-center text-muted-foreground">
+                        No driver activity in this range.
+                      </TableCell>
+                    </TableRow>
+                  ) : (
+                    driverRows.map((row) => {
+                      const isBest = row.onTimeRate != null && row.onTimeRate === bestOnTime;
+                      const onTimeNote =
+                        `${row.onTime} of ${row.onTime + row.late} with a deadline` +
+                        (row.deliveredWithoutDeadline > 0 ? `; ${row.deliveredWithoutDeadline} without a deadline excluded` : "");
+                      return (
+                        <TableRow key={row.driverId}>
+                          <TableCell className="max-w-[160px] truncate font-medium">{row.driverName}</TableCell>
+                          <TableCell className="text-right tabular-nums">{row.assigned}</TableCell>
+                          <TableCell className="text-right tabular-nums">{row.delivered}</TableCell>
+                          <TableCell className={cn("text-right tabular-nums", row.failed > 0 && "text-rose-600 dark:text-rose-400")}>
+                            {row.failed}
+                          </TableCell>
+                          <TableCell className="text-right tabular-nums text-muted-foreground">{pct(row.failureRate)}</TableCell>
+                          <TableCell className={cn("text-right tabular-nums", row.late > 0 && "text-amber-600 dark:text-amber-400")}>
+                            {row.late}
+                          </TableCell>
+                          <TableCell
+                            className={cn(
+                              "text-right font-medium tabular-nums",
+                              isBest ? "text-emerald-600 dark:text-emerald-400" : "text-muted-foreground"
+                            )}
+                            title={isBest ? `Best on-time rate — ${onTimeNote}` : onTimeNote}
+                          >
+                            {pct(row.onTimeRate)}
+                          </TableCell>
+                          <TableCell
+                            className="text-right tabular-nums text-muted-foreground"
+                            title={row.roadTimeExcluded ? `${row.roadTimeExcluded} excluded (missing timestamps)` : undefined}
+                          >
+                            {hrs(row.avgRoadHours)}
+                          </TableCell>
+                        </TableRow>
+                      );
+                    })
+                  )}
+                </TableBody>
+              </Table>
+            </CardContent>
+          </Card>
 
           {/* Delivery history */}
           <Card>
@@ -516,12 +787,23 @@ export default function ReportsView() {
               <div>
                 <CardTitle className="text-base">Delivery history</CardTitle>
                 <CardDescription className="text-xs">
-                  {items.length} {items.length === 1 ? "delivery" : "deliveries"} (max 500 per report)
+                  Showing {items.length} of {itemsTotal} {itemsTotal === 1 ? "delivery" : "deliveries"}
+                  {itemsTotal > items.length ? " — export CSV for the full list" : ""}
                 </CardDescription>
               </div>
               <CardAction>
-                <Button variant="outline" size="sm" onClick={handleExport} disabled={items.length === 0}>
-                  <Download className="size-4" aria-hidden="true" /> Export CSV
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => void handleExport()}
+                  disabled={itemsTotal === 0 || exporting || loading}
+                >
+                  {exporting ? (
+                    <Loader2 className="size-4 animate-spin" aria-hidden="true" />
+                  ) : (
+                    <Download className="size-4" aria-hidden="true" />
+                  )}{" "}
+                  Export deliveries CSV
                 </Button>
               </CardAction>
             </CardHeader>
@@ -549,39 +831,38 @@ export default function ReportsView() {
                         </TableCell>
                       </TableRow>
                     ) : (
-                      items.map((it) => (
-                        <TableRow key={it.id}>
-                          <TableCell className="font-mono text-xs">{it.trackingCode}</TableCell>
-                          <TableCell className="max-w-[160px] truncate font-medium">{it.recipientName}</TableCell>
-                          <TableCell className="max-w-[120px] truncate text-muted-foreground">{it.driverName ?? "—"}</TableCell>
-                          <TableCell className="font-mono text-xs text-muted-foreground">{it.vehicleRegistration ?? "—"}</TableCell>
-                          <TableCell>
-                            <StatusBadge status={it.status} />
-                          </TableCell>
-                          <TableCell>
-                            <PriorityBadge priority={it.priority} />
-                          </TableCell>
-                          <TableCell className="text-muted-foreground">{formatDate(it.createdAt)}</TableCell>
-                          <TableCell className="text-muted-foreground">
-                            {it.completedAt ? formatDateTime(it.completedAt) : "—"}
-                          </TableCell>
-                          <TableCell>
-                            {it.status === "DELIVERED" ? (
-                              it.isLate ? (
-                                <span className="font-medium text-amber-600 dark:text-amber-400">Late</span>
+                      items.map((it) => {
+                        const timeliness = it.timeliness ? TIMELINESS[it.timeliness] : undefined;
+                        return (
+                          <TableRow key={it.id}>
+                            <TableCell className="font-mono text-xs">{it.trackingCode}</TableCell>
+                            <TableCell className="max-w-[160px] truncate font-medium">{it.recipientName}</TableCell>
+                            <TableCell className="max-w-[120px] truncate text-muted-foreground">{it.driverName ?? "—"}</TableCell>
+                            <TableCell className="font-mono text-xs text-muted-foreground">{it.vehicleRegistration ?? "—"}</TableCell>
+                            <TableCell>
+                              <StatusBadge status={it.status} />
+                            </TableCell>
+                            <TableCell>
+                              <PriorityBadge priority={it.priority} />
+                            </TableCell>
+                            <TableCell className="text-muted-foreground">{formatDate(it.createdAt)}</TableCell>
+                            <TableCell className="text-muted-foreground">
+                              {it.completedAt ? formatDateTime(it.completedAt) : "—"}
+                            </TableCell>
+                            <TableCell>
+                              {timeliness ? (
+                                <span className={timeliness.className}>{timeliness.label}</span>
+                              ) : it.status === "FAILED" ? (
+                                <span className="font-medium text-rose-600 dark:text-rose-400">
+                                  {failureReasonLabel(it.failureReason)}
+                                </span>
                               ) : (
-                                <span className="font-medium text-emerald-600 dark:text-emerald-400">On time</span>
-                              )
-                            ) : it.status === "FAILED" ? (
-                              <span className="font-medium text-rose-600 dark:text-rose-400">
-                                {failureReasonLabel(it.failureReason)}
-                              </span>
-                            ) : (
-                              <span className="text-muted-foreground">—</span>
-                            )}
-                          </TableCell>
-                        </TableRow>
-                      ))
+                                <span className="text-muted-foreground">—</span>
+                              )}
+                            </TableCell>
+                          </TableRow>
+                        );
+                      })
                     )}
                   </TableBody>
                 </Table>

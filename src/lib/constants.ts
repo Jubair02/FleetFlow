@@ -37,7 +37,8 @@ export type FailureReasonCode = (typeof FAILURE_REASONS)[number]["code"];
 
 export function failureReasonLabel(code: string | null | undefined): string {
   if (!code) return "Unknown";
-  return FAILURE_REASONS.find((r) => r.code === code)?.label ?? code;
+  // Drop form hints like "(add internal note)" — this label is for display.
+  return FAILURE_REASONS.find((r) => r.code === code)?.label.replace(/\s*\(.*\)$/, "") ?? code;
 }
 
 // Statuses that mean "driver is actively working on it"
@@ -67,6 +68,26 @@ export function isValidDriverTransition(from: DeliveryStatus, to: DeliveryStatus
 
 export function isValidAdminTransition(from: DeliveryStatus, to: DeliveryStatus): boolean {
   return ADMIN_TRANSITIONS[from]?.includes(to) ?? false;
+}
+
+// ── Driver read access ───────────────────────────────────────
+
+interface AssignmentAccessRow {
+  driverId: string;
+  active: boolean;
+  outcome: string | null;
+  assignedAt: Date;
+}
+
+/**
+ * A driver may read a delivery while they hold its active assignment, for good
+ * once they delivered it, and after a failed/cancelled attempt only until it is
+ * reassigned — so they never see the next driver's details, notes or proof.
+ */
+export function driverCanReadDelivery(assignments: AssignmentAccessRow[], driverId: string): boolean {
+  if (assignments.some((a) => a.driverId === driverId && (a.active || a.outcome === "DELIVERED"))) return true;
+  const latest = assignments.reduce<AssignmentAccessRow | null>((acc, a) => (!acc || a.assignedAt > acc.assignedAt ? a : acc), null);
+  return !!latest && latest.driverId === driverId && (latest.outcome === "FAILED" || latest.outcome === "CANCELLED");
 }
 
 // ── Labels for UI ────────────────────────────────────────────
