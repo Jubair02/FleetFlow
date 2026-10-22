@@ -3,6 +3,8 @@ import { ApiError, fail, ok, readJson, requireAdmin, requireUser } from "@/lib/a
 import { updateOrgSchema, firstError } from "@/lib/validation";
 import { TX_OPTIONS } from "@/lib/delivery";
 import { auditData } from "@/lib/notify";
+import { toPlanDefinition } from "@/lib/plans";
+import type { OrgPlanInfo } from "@/lib/types-org";
 import type { Organization, Prisma } from "@prisma/client";
 
 const ORG_FIELDS = {
@@ -23,13 +25,20 @@ function serializeOrg(o: OrgRow) {
   return { ...o, createdAt: o.createdAt.toISOString() };
 }
 
-// GET /api/org — company profile & settings (any signed-in member of the org)
+// GET /api/org — company profile & settings (any signed-in member of the org),
+// plus which plan features are on so the UI can hide/explain gated actions.
 export async function GET() {
   try {
     const user = await requireUser();
-    const org = await db.organization.findUnique({ where: { id: user.organizationId }, select: ORG_FIELDS });
+    const org = await db.organization.findUnique({
+      where: { id: user.organizationId },
+      select: { ...ORG_FIELDS, planRecord: true },
+    });
     if (!org) throw new ApiError(404, "Organization not found");
-    return ok({ organization: serializeOrg(org) });
+    const { planRecord, ...fields } = org;
+    const plan = toPlanDefinition(planRecord);
+    const planInfo: OrgPlanInfo = { code: plan.code, name: plan.name, features: plan.features };
+    return ok({ organization: serializeOrg(fields), planInfo });
   } catch (e) {
     return fail(e);
   }

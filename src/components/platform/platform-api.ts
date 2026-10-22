@@ -11,9 +11,12 @@ import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "
 
 export class PlatformRequestError extends Error {
   status: number;
-  constructor(status: number, message: string) {
+  /** Parsed JSON body of the error response (e.g. a 409 `{ error, impact }`). */
+  data: unknown;
+  constructor(status: number, message: string, data?: unknown) {
     super(message);
     this.status = status;
+    this.data = data;
   }
 }
 
@@ -55,7 +58,7 @@ export async function platformFetch<T>(path: string, init?: RequestInit): Promis
     if (res.status === 401 && path !== "/api/platform/auth/login") {
       unauthorizedListeners.forEach((l) => l());
     }
-    throw new PlatformRequestError(res.status, message);
+    throw new PlatformRequestError(res.status, message, data);
   }
   return data as T;
 }

@@ -22,7 +22,11 @@ export async function GET(_req: Request, { params }: Params) {
 
     const delivery = await db.delivery.findUnique({
       where: { trackingToken: token },
-      include: { events: { where: { customerVisible: true }, orderBy: { createdAt: "asc" } } },
+      include: {
+        events: { where: { customerVisible: true }, orderBy: { createdAt: "asc" } },
+        // Public business details only — the customer knows the sender, not FleetFlow.
+        organization: { select: { name: true, phone: true } },
+      },
     });
 
     if (!delivery) {
@@ -41,6 +45,8 @@ export async function GET(_req: Request, { params }: Params) {
         expectedAt: delivery.expectedAt?.toISOString() ?? null,
         createdAt: delivery.createdAt.toISOString(),
         failureReason: delivery.status === "FAILED" ? failureReasonLabel(delivery.failureReason) : null,
+        completedAt: delivery.status === "DELIVERED" ? delivery.completedAt?.toISOString() ?? null : null,
+        sender: { name: delivery.organization.name, phone: delivery.organization.phone },
         timeline: delivery.events.map((e) => ({
           eventType: e.eventType,
           // Only pass through notes written intentionally for the customer.

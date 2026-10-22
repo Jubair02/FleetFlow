@@ -14,7 +14,8 @@ datasource db {
 model Organization {
   id        String   @id @default(cuid())
   name      String
-  plan      String   @default("trial") // trial | starter | growth | business — see src/lib/plans.ts
+  plan      String   @default("trial") // Plan.code (FK) — plans are managed in the platform console
+  planRecord Plan    @relation(fields: [plan], references: [code], onUpdate: Cascade, onDelete: Restrict)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -37,6 +38,11 @@ model Organization {
   subscriptionStatus String    @default("TRIAL") // TRIAL | ACTIVE | PAST_DUE | CANCELLED
   paidUntil          DateTime?
   billingNotes       String?
+  // Price snapshot taken when the plan was assigned: later plan price changes
+  // don't alter what an existing subscriber pays (grandfathering).
+  billingCycle         String    @default("MONTHLY") // MONTHLY | ANNUAL
+  subscriptionPriceBdt Int? // agreed price per billing cycle; null = free (trial)
+  planAssignedAt       DateTime  @default(now())
 
   users         User[]
   vehicles      Vehicle[]
@@ -226,6 +232,10 @@ model ImportBatch {
   organization   Organization @relation(fields: [organizationId], references: [id])
   fileName       String
   fileHash       String
+  source         String       @default("CSV") // CSV | PASTE
+  // Client-generated key per commit request: a retried request returns the
+  // original result instead of importing twice.
+  idempotencyKey String?
   rowCount       Int
   importedCount  Int
   skippedCount   Int
@@ -237,6 +247,7 @@ model ImportBatch {
   deliveries Delivery[]
 
   @@unique([organizationId, fileHash])
+  @@unique([organizationId, idempotencyKey])
   @@index([organizationId, createdAt])
 }
 
@@ -301,4 +312,29 @@ model PlatformAuditLog {
 
   @@index([createdAt])
   @@index([organizationId, createdAt])
+}
+
+// Subscription plan, editable by platform admins. Organization.plan references
+// Plan.code. Plans are never deleted (only deactivated) and codes are immutable.
+// Limits apply live to every subscriber; prices are snapshotted per organization.
+model Plan {
+  code                 String   @id // lowercase slug, e.g. "growth"
+  name                 String
+  description          String?
+  monthlyPriceBdt      Int? // null = not sold monthly (e.g. trial)
+  annualPriceBdt       Int? // null = no annual option
+  maxDrivers           Int? // null = unlimited
+  maxVehicles          Int?
+  maxAdmins            Int?
+  maxMonthlyDeliveries Int?
+  features             String[] // feature keys — see src/lib/plan-catalog.ts FEATURES
+  highlights           String[] // marketing bullets shown on pricing cards
+  active               Boolean  @default(true) // inactive: can't be newly assigned; subscribers keep it
+  isPublic             Boolean  @default(true) // shown on the public pricing table
+  isDefault            Boolean  @default(false) // plan given to self-service sign-ups (exactly one)
+  sortOrder            Int      @default(0)
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+
+  organizations Organization[]
 }

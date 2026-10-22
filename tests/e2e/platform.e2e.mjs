@@ -120,7 +120,7 @@ async function main() {
   r = await ops.get("/api/platform/users?search=fleetflow.test");
   check("users list across organizations, no password data", r.status === 200 && r.data.total >= 3 && !HASH_LIKE.test(r.text) && !/passwordHash/.test(r.text), r.data.total);
   r = await ops.get("/api/platform/plans");
-  check("plans list with organization counts", r.status === 200 && r.data.plans.length === 4 && r.data.plans.reduce((s, p) => s + p.organizationCount, 0) + r.data.unknownPlanCount >= 2, r.data);
+  check("plans list with organization counts", r.status === 200 && r.data.plans.length >= 4 && r.data.plans.reduce((s, p) => s + p.organizationCount, 0) >= 2, r.data);
 
   console.log("\n# Create organization");
   r = await ops.post("/api/platform/organizations", { companyName: `Meghna Foods ${stamp}`, adminName: "Farhan Kabir", adminEmail: `farhan-${stamp}@meghna.test`, plan: "starter" });
@@ -159,9 +159,9 @@ async function main() {
   check("reactivate organization", r.status === 200, r);
 
   console.log("\n# Plan & subscription");
-  r = await ops.patch(`/api/platform/organizations/${orgId}`, { action: "set-plan", plan: "nonexistent" });
+  r = await ops.patch(`/api/platform/organizations/${orgId}`, { action: "set-plan", plan: "nonexistent", billingCycle: "MONTHLY" });
   check("unknown plan rejected", r.status === 400, r.status);
-  r = await ops.patch(`/api/platform/organizations/${orgId}`, { action: "set-plan", plan: "growth" });
+  r = await ops.patch(`/api/platform/organizations/${orgId}`, { action: "set-plan", plan: "growth", billingCycle: "MONTHLY" });
   check("change plan", r.status === 200, r);
   r = await ops.patch(`/api/platform/organizations/${orgId}`, { action: "update-subscription", subscriptionStatus: "ACTIVE", paidUntil: "2026-11-30", billingNotes: "Paid by bKash, ref TX123" });
   check("record subscription manually", r.status === 200, r);

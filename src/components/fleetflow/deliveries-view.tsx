@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { ChevronLeft, ChevronRight, Download, FileSpreadsheet, Package, Plus, Search, X } from "lucide-react";
+import { ChevronLeft, ChevronRight, Download, FileSpreadsheet, Lock, Package, Plus, Search, X } from "lucide-react";
 
 import { useApiData } from "@/lib/api-client";
 import { useAppStore } from "@/store/app-store";
@@ -12,7 +12,8 @@ import { Badge } from "@/components/ui/badge";
 import { formatDate, friendlyDueDate, truncate } from "@/lib/format";
 import { DeliveryDetailDialog } from "@/components/fleetflow/delivery-detail-dialog";
 import { DeliveryFormDialog } from "@/components/fleetflow/delivery-form-dialog";
-import { ImportDialog, TEMPLATE_URL } from "@/components/fleetflow/import-dialog";
+import { ImportDialog, TEMPLATE_URL, type ImportedBatch } from "@/components/fleetflow/import-dialog";
+import { useOrgPlanInfo } from "@/components/fleetflow/plan-panel";
 import { isRangeInverted, rangeFromParam, rangeToParam } from "@/components/fleetflow/date-range";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -196,6 +197,11 @@ export function DeliveriesView() {
   // ── create / import dialogs ───────────────────────────────
   const [createOpen, setCreateOpen] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
+  // CSV import is a plan feature. When the plan lacks it the button stays clickable
+  // but the dialog explains how to upgrade instead of failing on upload.
+  const { planInfo, locked } = useOrgPlanInfo();
+  const importLocked = locked("csv_import");
+  const importLockedHint = importLocked ? `Bulk import isn't included in your ${planInfo?.name ?? "current"} plan — see how to upgrade` : undefined;
 
   // One-shot action from elsewhere (e.g. dashboard "Import CSV"): open the
   // dialog during render, then clear the store so it doesn't re-open.
@@ -206,8 +212,12 @@ export function DeliveriesView() {
     if (deliveriesAction) useAppStore.getState().setDeliveriesAction(null);
   }, [deliveriesAction]);
 
-  /** After an import: show exactly the deliveries from that batch. */
-  function showImported(batch: { id: string; fileName: string }) {
+  /**
+   * After an import: show exactly the deliveries from that batch. A large
+   * import is saved in several batches (one per chunk) — then `batch` is null
+   * and we show all deliveries newest-first, where the import is on top.
+   */
+  function showImported(batch: ImportedBatch) {
     if (searchTimer.current) clearTimeout(searchTimer.current);
     setSearchInput("");
     setSearch("");
@@ -320,8 +330,15 @@ export function DeliveriesView() {
         <div className="hidden flex-1 sm:block" aria-hidden />
 
         <div className="flex gap-2">
-          <Button variant="outline" className="min-h-11 flex-1 sm:min-h-9 sm:flex-none" onClick={() => setImportOpen(true)}>
-            <FileSpreadsheet /> Import CSV
+          <Button
+            variant="outline"
+            className="min-h-11 flex-1 sm:min-h-9 sm:flex-none"
+            onClick={() => setImportOpen(true)}
+            title={importLockedHint}
+            aria-description={importLockedHint}
+          >
+            {importLocked ? <Lock /> : <FileSpreadsheet />} Import
+            {importLocked ? <span className="sr-only">(upgrade required)</span> : null}
           </Button>
           <Button className="min-h-11 flex-1 sm:min-h-9 sm:flex-none" onClick={() => setCreateOpen(true)}>
             <Plus /> New delivery
@@ -385,14 +402,24 @@ export function DeliveriesView() {
             <Button className="min-h-11 sm:min-h-9" onClick={() => setCreateOpen(true)}>
               <Plus /> Create delivery
             </Button>
-            <Button variant="outline" className="min-h-11 sm:min-h-9" onClick={() => setImportOpen(true)}>
-              <FileSpreadsheet /> Import from CSV
+            <Button
+              variant="outline"
+              className="min-h-11 sm:min-h-9"
+              onClick={() => setImportOpen(true)}
+              title={importLockedHint}
+              aria-description={importLockedHint}
+            >
+              {importLocked ? <Lock /> : <FileSpreadsheet />} Import from a spreadsheet
+              {importLocked ? <span className="sr-only">(upgrade required)</span> : null}
             </Button>
-            <Button asChild variant="ghost" className="min-h-11 sm:min-h-9">
-              <a href={TEMPLATE_URL} download>
-                <Download /> Download template
-              </a>
-            </Button>
+            {/* The template is part of the import feature (the server refuses it without csv_import). */}
+            {importLocked ? null : (
+              <Button asChild variant="ghost" className="min-h-11 sm:min-h-9">
+                <a href={TEMPLATE_URL} download>
+                  <Download /> Download template
+                </a>
+              </Button>
+            )}
           </div>
         </div>
       ) : null}

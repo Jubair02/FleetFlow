@@ -83,7 +83,7 @@ export async function requirePlatformAdmin(opts: { allowPasswordChangePending?: 
 interface PlatformAuditInput {
   actor: Pick<PlatformAdmin, "id" | "name"> | null;
   action: string;
-  targetType: "Organization" | "User" | "PlatformAdmin";
+  targetType: "Organization" | "User" | "PlatformAdmin" | "Plan";
   targetId?: string | null;
   organizationId?: string | null;
   /** Safe metadata only — never passwords, hashes or tokens. */

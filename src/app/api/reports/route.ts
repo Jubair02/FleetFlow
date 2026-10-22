@@ -1,6 +1,7 @@
 import { db } from "@/lib/db";
 import { fail, localDayKey, ok, parseDateParam, parseTzOffset, requireAdmin } from "@/lib/api-helpers";
 import { failureReasonLabel } from "@/lib/constants";
+import { assertFeature } from "@/lib/plans";
 import {
   classifyTimeliness,
   driverPerformance,
@@ -36,6 +37,7 @@ function dayKeysBetween(firstKey: string, lastKey: string, max: number): string[
 }
 
 // GET /api/reports?from=&to=&tz=&driverId=&vehicleId=&status=&priority=&export=1
+// export=1 requires the plan feature report_export (403 otherwise).
 // Delivery history with success / on-time / timing metrics + per-driver breakdown.
 // `from` is inclusive, `to` exclusive (ISO instants); `tz` = viewer's getTimezoneOffset().
 // Every metric is defined in src/lib/report-metrics.ts; every query below is
@@ -52,6 +54,8 @@ export async function GET(req: Request) {
     const driverId = q("driverId");
     const vehicleId = q("vehicleId");
     const exportAll = q("export") === "1";
+    // Viewing reports is never limited; the CSV export is a plan feature.
+    if (exportAll) await assertFeature(db, user.organizationId, "report_export");
 
     const where: Prisma.DeliveryWhereInput = { organizationId: user.organizationId };
     if (from || to) {

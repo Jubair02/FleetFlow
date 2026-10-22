@@ -22,13 +22,19 @@ export function timeAgo(iso: string | null | undefined): string {
   return formatDistanceToNow(new Date(iso), { addSuffix: true });
 }
 
+/** A deadline at exactly local midnight was given as a date only — don't show "12:00 AM". */
+export function isDateOnly(d: Date): boolean {
+  return d.getHours() === 0 && d.getMinutes() === 0 && d.getSeconds() === 0;
+}
+
 export function friendlyDueDate(iso: string | null | undefined): string {
   if (!iso) return "No deadline";
   const d = new Date(iso);
-  if (isToday(d)) return `Today, ${format(d, "h:mm a")}`;
-  if (isTomorrow(d)) return `Tomorrow, ${format(d, "h:mm a")}`;
-  if (isYesterday(d)) return `Yesterday, ${format(d, "h:mm a")}`;
-  return formatDateTime(iso);
+  const time = isDateOnly(d) ? "" : `, ${format(d, "h:mm a")}`;
+  if (isToday(d)) return `Today${time}`;
+  if (isTomorrow(d)) return `Tomorrow${time}`;
+  if (isYesterday(d)) return `Yesterday${time}`;
+  return isDateOnly(d) ? formatDate(iso) : formatDateTime(iso);
 }
 
 export function initials(name: string): string {

@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
 import {
   BarChart3,
   Building2,
@@ -34,7 +35,6 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { ConsoleContext, type ConsoleContextValue, type OrgRef, type PlatformView } from "./console-context";
 import { onPlatformUnauthorized, platformApi } from "./platform-api";
-import { PlatformLogin } from "./platform-login";
 import { PlatformPasswordDialog } from "./password-dialog";
 import { PlatformBadge } from "./shared";
 import { OverviewView } from "./overview-view";
@@ -176,41 +176,23 @@ function SidebarContent({
   );
 }
 
-/** Signed-in console. Holds its own auth state so a 401 returns to the console sign-in, never the company app. */
+/**
+ * Signed-in console. Sign-in itself happens on the shared form at "/"; when
+ * the platform session ends (401) or the admin signs out, the browser goes
+ * back there — never into the company app's state.
+ */
 export function PlatformConsole({ initialAdmin }: { initialAdmin: PlatformAdminInfo }) {
-  const [admin, setAdmin] = useState<PlatformAdminInfo | null>(initialAdmin);
-  const [loginNotice, setLoginNotice] = useState<string | null>(null);
+  const [admin, setAdmin] = useState<PlatformAdminInfo>(initialAdmin);
+  const router = useRouter();
 
-  useEffect(
-    () =>
-      onPlatformUnauthorized(() => {
-        setLoginNotice("Your platform session has ended — please sign in again.");
-        setAdmin(null);
-      }),
-    []
-  );
-
-  if (!admin) {
-    return (
-      <PlatformLogin
-        notice={loginNotice}
-        onSignedIn={(a) => {
-          setLoginNotice(null);
-          setAdmin(a);
-        }}
-      />
-    );
-  }
+  useEffect(() => onPlatformUnauthorized(() => router.replace("/?next=platform")), [router]);
 
   return (
     <ConsoleShell
       key={admin.id}
       admin={admin}
-      onAdminChange={setAdmin}
-      onSignedOut={() => {
-        setLoginNotice("You have signed out.");
-        setAdmin(null);
-      }}
+      onAdminChange={(a) => (a ? setAdmin(a) : router.replace("/"))}
+      onSignedOut={() => router.replace("/")}
     />
   );
 }

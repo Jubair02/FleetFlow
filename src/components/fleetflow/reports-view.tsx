@@ -11,6 +11,7 @@ import {
   Filter,
   Info,
   Loader2,
+  Lock,
   Package,
   PackageCheck,
   RotateCcw,
@@ -33,6 +34,7 @@ import {
   YAxis,
 } from "recharts";
 import { PriorityBadge, StatusBadge } from "@/components/fleetflow/badges";
+import { isPlanRefusal, UpgradeDialog, useOrgPlanInfo } from "@/components/fleetflow/plan-panel";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -279,6 +281,11 @@ export default function ReportsView() {
 
   const [rangeError, setRangeError] = useState<string | null>(null);
   const [exporting, setExporting] = useState(false);
+  // CSV export is a plan feature: explain the upgrade instead of exporting (the server also refuses export=1).
+  const { planInfo, locked } = useOrgPlanInfo();
+  const exportLocked = locked("report_export");
+  const [upgrade, setUpgrade] = useState<{ open: boolean; message: string | null }>({ open: false, message: null });
+  const exportLockedHint = exportLocked ? `CSV export isn't included in your ${planInfo?.name ?? "current"} plan — see how to upgrade` : undefined;
 
   const appliedUrl = useMemo(() => {
     const params = new URLSearchParams();
@@ -343,12 +350,17 @@ export default function ReportsView() {
   // Export re-fetches the applied report with export=1 so every matching row is included.
   const handleExport = async () => {
     if (!data || exporting) return;
+    if (exportLocked) {
+      setUpgrade({ open: true, message: null });
+      return;
+    }
     setExporting(true);
     let full: ReportData;
     try {
       full = await api.get<ReportData>(`${appliedUrl}&export=1`);
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : "Export failed");
+      if (isPlanRefusal(e)) setUpgrade({ open: true, message: e.message });
+      else toast.error(e instanceof Error ? e.message : "Export failed");
       setExporting(false);
       return;
     }
@@ -376,6 +388,10 @@ export default function ReportsView() {
   // The driver breakdown is never capped, so it exports straight from the loaded report.
   const handleDriverExport = () => {
     if (driverRows.length === 0) return;
+    if (exportLocked) {
+      setUpgrade({ open: true, message: null });
+      return;
+    }
     const rows: (string | number | null)[][] = [
       [
         "Driver",
@@ -713,8 +729,16 @@ export default function ReportsView() {
                 </CardDescription>
               </div>
               <CardAction>
-                <Button variant="outline" size="sm" onClick={handleDriverExport} disabled={driverRows.length === 0 || loading}>
-                  <Users className="size-4" aria-hidden="true" /> Export drivers CSV
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={handleDriverExport}
+                  disabled={driverRows.length === 0 || loading}
+                  title={exportLockedHint}
+                  aria-description={exportLockedHint}
+                >
+                  {exportLocked ? <Lock className="size-4" aria-hidden="true" /> : <Users className="size-4" aria-hidden="true" />} Export drivers CSV
+                  {exportLocked ? <span className="sr-only">(upgrade required)</span> : null}
                 </Button>
               </CardAction>
             </CardHeader>
@@ -788,7 +812,7 @@ export default function ReportsView() {
                 <CardTitle className="text-base">Delivery history</CardTitle>
                 <CardDescription className="text-xs">
                   Showing {items.length} of {itemsTotal} {itemsTotal === 1 ? "delivery" : "deliveries"}
-                  {itemsTotal > items.length ? " — export CSV for the full list" : ""}
+                  {itemsTotal > items.length && !exportLocked ? " — export CSV for the full list" : ""}
                 </CardDescription>
               </div>
               <CardAction>
@@ -797,13 +821,18 @@ export default function ReportsView() {
                   size="sm"
                   onClick={() => void handleExport()}
                   disabled={itemsTotal === 0 || exporting || loading}
+                  title={exportLockedHint}
+                  aria-description={exportLockedHint}
                 >
                   {exporting ? (
                     <Loader2 className="size-4 animate-spin" aria-hidden="true" />
+                  ) : exportLocked ? (
+                    <Lock className="size-4" aria-hidden="true" />
                   ) : (
                     <Download className="size-4" aria-hidden="true" />
                   )}{" "}
                   Export deliveries CSV
+                  {exportLocked ? <span className="sr-only">(upgrade required)</span> : null}
                 </Button>
               </CardAction>
             </CardHeader>
@@ -871,6 +900,13 @@ export default function ReportsView() {
           </Card>
         </div>
       )}
+      <UpgradeDialog
+        feature="report_export"
+        planName={planInfo?.name}
+        message={upgrade.message}
+        open={upgrade.open}
+        onOpenChange={(open) => setUpgrade((u) => ({ ...u, open }))}
+      />
     </div>
   );
 }

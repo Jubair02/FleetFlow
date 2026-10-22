@@ -198,7 +198,7 @@ function UserCard({ onNavigate }: { onNavigate?: () => void }) {
   );
 }
 
-function NotificationBell() {
+function NotificationBell({ triggerClassName }: { triggerClassName?: string } = {}) {
   const setView = useAppStore((s) => s.setView);
   const bump = useAppStore((s) => s.bump);
   const session = useAppStore((s) => s.session);
@@ -252,7 +252,7 @@ function NotificationBell() {
   return (
     <Popover open={open} onOpenChange={setOpen}>
       <PopoverTrigger asChild>
-        <Button variant="ghost" size="icon" className="relative" aria-label={`Notifications${unread ? ` (${unread} unread)` : ""}`}>
+        <Button variant="ghost" size="icon" className={cn("relative", triggerClassName)} aria-label={`Notifications${unread ? ` (${unread} unread)` : ""}`}>
           <Bell className="size-5" />
           {unread > 0 && (
             <span className="absolute -right-0.5 -top-0.5 flex size-4.5 min-w-4.5 items-center justify-center rounded-full bg-rose-600 px-1 text-[10px] font-bold text-white">
@@ -314,19 +314,36 @@ function NotificationBell() {
   );
 }
 
-function ThemeToggle() {
+function ThemeToggle({ className }: { className?: string } = {}) {
   const { resolvedTheme, setTheme } = useTheme();
   return (
     <Button
       variant="ghost"
       size="icon"
       aria-label="Toggle theme"
+      className={className}
       onClick={() => setTheme(resolvedTheme === "dark" ? "light" : "dark")}
     >
       {/* CSS-driven icon swap avoids hydration mismatch without setState-in-effect */}
       <Sun className="size-5 hidden dark:block" />
       <Moon className="size-5 dark:hidden" />
     </Button>
+  );
+}
+
+/** Driver phones: theme switch lives in the account menu (header stays compact). */
+function DriverThemeMenuItem() {
+  const { resolvedTheme, setTheme } = useTheme();
+  return (
+    <DropdownMenuItem
+      className="cursor-pointer max-md:min-h-11 md:hidden"
+      onSelect={() => setTheme(resolvedTheme === "dark" ? "light" : "dark")}
+    >
+      <Sun className="mr-2 hidden size-4 dark:block" />
+      <Moon className="mr-2 size-4 dark:hidden" />
+      <span className="dark:hidden">Dark mode</span>
+      <span className="hidden dark:inline">Light mode</span>
+    </DropdownMenuItem>
   );
 }
 
@@ -360,20 +377,35 @@ function DriverBottomNav() {
     { view: "notifications", label: "Alerts", icon: Bell },
   ];
   return (
-    <nav className="fixed inset-x-0 bottom-0 z-40 border-t bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/80 md:hidden" style={{ paddingBottom: "env(safe-area-inset-bottom)" }} aria-label="Driver navigation">
-      <div className="grid grid-cols-3">
+    <nav
+      className="fixed inset-x-0 bottom-0 z-40 border-t border-border/70 bg-background/95 pb-[env(safe-area-inset-bottom)] shadow-[0_-8px_24px_-16px_rgb(0_0_0/0.18)] backdrop-blur supports-[backdrop-filter]:bg-background/85 md:hidden dark:border-white/10 dark:shadow-none"
+      aria-label="Driver navigation"
+    >
+      <div className="mx-auto grid max-w-md grid-cols-3 gap-2 px-3 pt-1.5 pb-1.5">
         {items.map((item) => {
           const active = view === item.view;
           const Icon = item.icon;
           return (
             <button
               key={item.view}
+              type="button"
               onClick={() => setView(item.view)}
-              className={cn("flex min-h-14 flex-col items-center justify-center gap-1 text-[11px] font-medium", active ? "text-primary" : "text-muted-foreground")}
+              className={cn(
+                "group flex min-h-14 flex-col items-center justify-center gap-1 rounded-2xl text-xs font-medium outline-none transition-colors duration-150 focus-visible:ring-[3px] focus-visible:ring-ring/50",
+                active ? "text-primary" : "text-muted-foreground hover:text-foreground"
+              )}
               aria-current={active ? "page" : undefined}
             >
-              <Icon className="size-5" />
-              {item.label}
+              <span
+                className={cn(
+                  "flex h-8 w-14 items-center justify-center rounded-full transition-[background-color,transform] duration-200 motion-safe:group-active:scale-95",
+                  active ? "bg-primary/12 dark:bg-primary/15" : "bg-transparent"
+                )}
+                aria-hidden="true"
+              >
+                <Icon className="size-5" strokeWidth={active ? 2.25 : 2} />
+              </span>
+              <span className={cn(active && "font-semibold")}>{item.label}</span>
             </button>
           );
         })}
@@ -411,7 +443,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           {/* Mobile nav */}
           <Sheet open={mobileNavOpen} onOpenChange={setMobileNavOpen}>
             <SheetTrigger asChild>
-              <Button variant="ghost" size="icon" className="md:hidden" aria-label="Open menu">
+              {/* Drivers navigate with the bottom bar on phones — no hamburger for them. */}
+              <Button variant="ghost" size="icon" className={isDriver ? "hidden" : "md:hidden"} aria-label="Open menu">
                 <Menu className="size-5" />
               </Button>
             </SheetTrigger>
@@ -421,13 +454,27 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             </SheetContent>
           </Sheet>
 
-          <h1 className="truncate text-base font-semibold tracking-tight md:text-lg">{VIEW_TITLES[view]}</h1>
+          {isDriver ? (
+            <div className="min-w-0 leading-tight">
+              <h1 className="truncate text-base font-semibold tracking-tight md:text-lg">{VIEW_TITLES[view]}</h1>
+              <p className="truncate text-xs text-muted-foreground md:hidden">{session?.organizationName}</p>
+            </div>
+          ) : (
+            <h1 className="truncate text-base font-semibold tracking-tight md:text-lg">{VIEW_TITLES[view]}</h1>
+          )}
           <div className="ml-auto flex items-center gap-1">
-            <NotificationBell />
-            <ThemeToggle />
+            <NotificationBell triggerClassName={isDriver ? "max-md:size-11" : undefined} />
+            {/* Drivers on phones get the theme switch inside the account menu instead. */}
+            <ThemeToggle className={isDriver ? "max-md:hidden" : undefined} />
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
-                <button className="ml-1 rounded-full outline-none ring-primary/40 focus-visible:ring-2" aria-label="Account menu">
+                <button
+                  className={cn(
+                    "ml-1 rounded-full outline-none ring-primary/40 focus-visible:ring-2",
+                    isDriver && "max-md:ml-0 max-md:flex max-md:size-11 max-md:items-center max-md:justify-center"
+                  )}
+                  aria-label="Account menu"
+                >
                   <Avatar className="size-8 border">
                     <AvatarFallback className="bg-primary/10 text-primary text-xs font-semibold">{session ? initials(session.name) : "?"}</AvatarFallback>
                   </Avatar>
@@ -449,11 +496,12 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                     <Settings className="mr-2 size-4" /> Company settings
                   </DropdownMenuItem>
                 )}
-                <DropdownMenuItem className="cursor-pointer" onSelect={openPasswordDialog}>
+                {isDriver && <DriverThemeMenuItem />}
+                <DropdownMenuItem className={cn("cursor-pointer", isDriver && "max-md:min-h-11")} onSelect={openPasswordDialog}>
                   <KeyRound className="mr-2 size-4" /> Change password
                 </DropdownMenuItem>
                 <DropdownMenuSeparator />
-                <DropdownMenuItem className="cursor-pointer" disabled={loggingOut} onSelect={() => void logout()}>
+                <DropdownMenuItem className={cn("cursor-pointer", isDriver && "max-md:min-h-11")} disabled={loggingOut} onSelect={() => void logout()}>
                   <LogOut className="mr-2 size-4" /> Sign out
                 </DropdownMenuItem>
               </DropdownMenuContent>
@@ -461,7 +509,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           </div>
         </header>
 
-        <main className={cn("flex-1 px-4 py-5 md:px-6 md:py-6", isDriver && "pb-24 md:pb-6")}>{children}</main>
+        <main className={cn("flex-1 px-4 py-5 md:px-6 md:py-6", isDriver && "pb-[calc(6rem+env(safe-area-inset-bottom))] md:pb-6")}>{children}</main>
 
         <footer className={cn("mt-auto border-t bg-background", isDriver && "hidden md:block")}>
           <div className="flex flex-col items-center justify-between gap-1 px-6 py-3 text-xs text-muted-foreground sm:flex-row">

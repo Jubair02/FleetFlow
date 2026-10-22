@@ -1,6 +1,7 @@
 "use client";
 
 import { useRef, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import Image from "next/image";
 import { Truck, Mail, Lock, LoaderCircle, ShieldCheck, Users, UserCheck, Building2, ArrowRight } from "lucide-react";
 import { toast } from "sonner";
@@ -8,6 +9,9 @@ import { api } from "@/lib/api-client";
 import { cn } from "@/lib/utils";
 import { useAppStore } from "@/store/app-store";
 import type { SessionUser } from "@/lib/types";
+
+/** /api/auth/login: where to go is decided by the server from the verified account. */
+type LoginResponse = { kind: "tenant"; user: SessionUser; redirectTo: "/" } | { kind: "platform"; redirectTo: "/platform" };
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -32,6 +36,8 @@ export function LoginView({ onCreateAccount }: { onCreateAccount?: () => void })
   const [error, setError] = useState<string | null>(null);
   // Synchronous guard: state updates are async, so a fast double click could slip past `loading`.
   const inFlight = useRef(false);
+  // Hint only (never a redirect target): set when /platform sent a signed-out visitor here.
+  const fromPlatform = useSearchParams().get("next") === "platform";
 
   const submit = async (e?: React.FormEvent, creds?: { email: string; password: string }) => {
     e?.preventDefault();
@@ -46,15 +52,20 @@ export function LoginView({ onCreateAccount }: { onCreateAccount?: () => void })
     setLoading(true);
     setError(null);
     try {
-      const res = await api.post<{ user: SessionUser }>("/api/auth/login", { email: em, password: pw });
+      const res = await api.post<LoginResponse>("/api/auth/login", { email: em, password: pw });
+      if (res.kind === "platform") {
+        // FleetFlow staff → the platform console (full navigation; keep the spinner).
+        window.location.assign(res.redirectTo);
+        return;
+      }
       setSession(res.user);
       setView(res.user.role === "ADMIN" ? "dashboard" : "driver-jobs");
       if (!res.user.mustChangePassword) toast.success(`Welcome back, ${res.user.name.split(" ")[0]}!`);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Sign in failed");
     } finally {
+      if (inFlight.current && !window.location.pathname.startsWith("/platform")) setLoading(false);
       inFlight.current = false;
-      setLoading(false);
     }
   };
 
@@ -103,7 +114,14 @@ export function LoginView({ onCreateAccount }: { onCreateAccount?: () => void })
             </div>
 
             <h1 className="text-2xl font-semibold tracking-tight">Sign in</h1>
-            <p className="mt-1.5 text-sm text-muted-foreground">Use your dispatcher or driver account to continue.</p>
+            <p className="mt-1.5 text-sm text-muted-foreground">
+              One sign-in for company admins, dispatchers, drivers and FleetFlow staff — you&apos;ll land in the right workspace.
+            </p>
+            {fromPlatform ? (
+              <p className="mt-3 rounded-lg border border-violet-200 bg-violet-50 px-3 py-2 text-sm text-violet-800 dark:border-violet-900 dark:bg-violet-950/40 dark:text-violet-200" role="status">
+                Sign in with your FleetFlow staff account to open the platform console.
+              </p>
+            ) : null}
 
             <form onSubmit={submit} className="mt-6 space-y-4" noValidate>
               <div className="space-y-2">

@@ -4,8 +4,7 @@ import { useState } from "react";
 import { Building2, LoaderCircle, Plus, Search, X } from "lucide-react";
 import { toast } from "sonner";
 import { formatDate, timeAgo } from "@/lib/format";
-import { getPlan, type PlanCode } from "@/lib/plan-catalog";
-import type { CreateOrgResult, Paged, PlatformOrgRow } from "@/lib/platform-types";
+import type { CreateOrgResult, Paged, PlatformOrgRow, PlatformPlansData } from "@/lib/platform-types";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -26,7 +25,7 @@ import {
   OrgStatusBadge,
   PageHeader,
   PaginationBar,
-  PLAN_CODES,
+  formatPrice,
   PlanBadge,
   ServerError,
   SubscriptionBadge,
@@ -53,6 +52,8 @@ export function OrganizationsView() {
     page,
   });
   const { data, loading, error, reload } = usePlatformData<Paged<PlatformOrgRow>>(url);
+  const { data: plansData, error: plansError } = usePlatformData<PlatformPlansData>("/api/platform/plans");
+  const plans = plansData?.plans ?? [];
   const filtered = !!debouncedSearch || status !== "all" || plan !== "all";
 
   const resetPage = <T,>(setter: (v: T) => void) => (v: T) => {
@@ -106,11 +107,18 @@ export function OrganizationsView() {
             </SelectTrigger>
             <SelectContent>
               <SelectItem value="all">All plans</SelectItem>
-              {PLAN_CODES.map((c) => (
-                <SelectItem key={c} value={c}>
-                  {getPlan(c).name}
+              {plans.map((p) => (
+                <SelectItem key={p.code} value={p.code}>
+                  {p.name}
+                  {!p.active ? " (inactive)" : ""}
                 </SelectItem>
               ))}
+              {plan !== "all" && !plans.some((p) => p.code === plan) && <SelectItem value={plan}>{plan}</SelectItem>}
+              {plansError && !plansData && (
+                <div className="px-2 py-1.5 text-xs text-muted-foreground" role="note">
+                  Couldn&apos;t load plans
+                </div>
+              )}
             </SelectContent>
           </Select>
           {filtered && (
@@ -183,7 +191,8 @@ export function OrganizationsView() {
                       <OrgStatusBadge status={o.status} />
                     </TableCell>
                     <TableCell>
-                      <PlanBadge plan={o.plan} />
+                      <PlanBadge name={o.planName || o.plan} />
+                      <div className="mt-0.5 text-[11px] text-muted-foreground tabular-nums">{formatPrice(o.subscriptionPriceBdt, o.billingCycle)}</div>
                     </TableCell>
                     <TableCell>
                       <SubscriptionBadge status={o.subscriptionStatus} />
@@ -213,6 +222,8 @@ export function OrganizationsView() {
         key={createSeq}
         open={createOpen}
         onOpenChange={setCreateOpen}
+        plans={plansData}
+        plansError={plansError}
         onCreated={(res, companyName) => {
           setTempPassword({
             title: `${companyName} is ready`,
@@ -233,7 +244,7 @@ export function OrganizationsView() {
 type CreateField = "companyName" | "adminName" | "adminEmail" | "plan" | "phone";
 type CreateErrors = Partial<Record<CreateField, string>>;
 
-export function validateCreateOrg(f: Record<CreateField, string>): CreateErrors {
+export function validateCreateOrg(f: Record<CreateField, string>, assignablePlanCodes: string[]): CreateErrors {
   const e: CreateErrors = {};
   const company = f.companyName.trim();
   if (company.length < 2) e.companyName = "Company name must be at least 2 characters";
@@ -243,7 +254,7 @@ export function validateCreateOrg(f: Record<CreateField, string>): CreateErrors 
   else if (name.length > 120) e.adminName = "Name must be 120 characters or fewer";
   const email = f.adminEmail.trim();
   if (!EMAIL_RE.test(email) || email.length > 254) e.adminEmail = "Enter a valid email";
-  if (!PLAN_CODES.includes(f.plan as PlanCode)) e.plan = "Choose a plan";
+  if (!assignablePlanCodes.includes(f.plan)) e.plan = "Choose an active plan";
   const phone = f.phone.trim();
   if (phone && (phone.length < 6 || phone.length > 30)) e.phone = "Phone must be 6–30 characters";
   return e;
@@ -252,13 +263,21 @@ export function validateCreateOrg(f: Record<CreateField, string>): CreateErrors 
 function CreateOrgDialog({
   open,
   onOpenChange,
+  plans,
+  plansError,
   onCreated,
 }: {
   open: boolean;
   onOpenChange: (o: boolean) => void;
+  plans: PlatformPlansData | null;
+  plansError: string | null;
   onCreated: (res: CreateOrgResult, companyName: string) => void;
 }) {
-  const [form, setForm] = useState<Record<CreateField, string>>({ companyName: "", adminName: "", adminEmail: "", plan: "trial", phone: "" });
+  // Only active plans can be newly assigned. "" = use the default plan once the list has loaded.
+  const assignable = (plans?.plans ?? []).filter((p) => p.active);
+  const defaultCode = assignable.find((p) => p.isDefault)?.code ?? assignable[0]?.code ?? "";
+  const [form, setForm] = useState<Record<CreateField, string>>({ companyName: "", adminName: "", adminEmail: "", plan: "", phone: "" });
+  const planValue = form.plan || defaultCode;
   const [errors, setErrors] = useState<CreateErrors>({});
   const [serverError, setServerError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -270,7 +289,7 @@ function CreateOrgDialog({
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
-    const found = validateCreateOrg(form);
+    const found = validateCreateOrg({ ...form, plan: planValue }, assignable.map((p) => p.code));
     setErrors(found);
     setServerError(null);
     if (Object.keys(found).length) return;
@@ -281,7 +300,7 @@ function CreateOrgDialog({
         companyName,
         adminName: form.adminName.trim(),
         adminEmail: form.adminEmail.trim().toLowerCase(),
-        plan: form.plan,
+        plan: planValue,
         ...(form.phone.trim() ? { phone: form.phone.trim() } : {}),
       });
       toast.success(`${companyName} created`);
@@ -333,19 +352,20 @@ function CreateOrgDialog({
           <div className="grid gap-4 sm:grid-cols-2">
             <div className="space-y-1.5">
               <Label htmlFor="co-plan">Plan</Label>
-              <Select value={form.plan} onValueChange={(v) => set("plan", v)} disabled={submitting}>
+              <Select value={planValue} onValueChange={(v) => set("plan", v)} disabled={submitting || assignable.length === 0}>
                 <SelectTrigger id="co-plan" className="w-full" {...errorProps("co-plan", errors.plan)}>
-                  <SelectValue />
+                  <SelectValue placeholder={plans ? "No active plans" : plansError ? "Couldn't load plans" : "Loading plans…"} />
                 </SelectTrigger>
                 <SelectContent>
-                  {PLAN_CODES.map((c) => (
-                    <SelectItem key={c} value={c}>
-                      {getPlan(c).name}
+                  {assignable.map((p) => (
+                    <SelectItem key={p.code} value={p.code}>
+                      {p.name}
+                      {p.isDefault ? " · default" : ""}
                     </SelectItem>
                   ))}
                 </SelectContent>
               </Select>
-              <FieldError id="co-plan-error" message={errors.plan} />
+              <FieldError id="co-plan-error" message={errors.plan ?? (plansError && !plans ? plansError : undefined)} />
             </div>
             <div className="space-y-1.5">
               <Label htmlFor="co-phone">
@@ -355,12 +375,15 @@ function CreateOrgDialog({
               <FieldError id="co-phone-error" message={errors.phone} />
             </div>
           </div>
+          <p className="text-[11px] text-muted-foreground">
+            The plan&apos;s current list price is recorded. Change the billing cycle or record a negotiated price later from the organization panel.
+          </p>
           <ServerError message={serverError} />
           <DialogFooter>
             <Button type="button" variant="outline" onClick={() => onOpenChange(false)} disabled={submitting}>
               Cancel
             </Button>
-            <Button type="submit" disabled={submitting}>
+            <Button type="submit" disabled={submitting || !planValue}>
               {submitting && <LoaderCircle className="animate-spin" aria-hidden />}
               {submitting ? "Creating…" : "Create organization"}
             </Button>

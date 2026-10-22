@@ -5,9 +5,10 @@ import { ApiError, fail, ok, readJson } from "@/lib/api-helpers";
 import { clientIp, generateTempPassword } from "@/lib/account";
 import { TX_OPTIONS } from "@/lib/delivery";
 import { DEFAULT_TIMEZONE } from "@/lib/timezone";
+import { listPrice } from "@/lib/plans";
 import { platformAuditData, requirePlatformAdmin } from "@/lib/platform-auth";
 import {
-  ORG_PAGE_SIZE, createOrgSchema, orgListQuery, paged, parseBody, parseQuery, startOfUtcMonth, supportAuditData,
+  ORG_PAGE_SIZE, createOrgSchemaFor, orgListQuery, toBillingCycle, paged, parseBody, parseQuery, startOfUtcMonth, supportAuditData,
 } from "@/lib/platform-service";
 import type { CreateOrgResult, OrgStatus, PlatformOrgRow, SubscriptionStatus } from "@/lib/platform-types";
 
@@ -16,10 +17,13 @@ export async function GET(req: Request) {
   try {
     await requirePlatformAdmin();
     const q = parseQuery(orgListQuery, new URL(req.url).searchParams, ["search", "status", "plan", "page"]);
+    if (q.plan && !(await db.plan.findUnique({ where: { code: q.plan }, select: { code: true } }))) {
+      throw new ApiError(400, "Unknown plan");
+    }
 
     const where: Prisma.OrganizationWhereInput = {
       ...(q.status ? { status: q.status } : {}),
-      ...(q.plan ? { plan: { equals: q.plan, mode: "insensitive" } } : {}),
+      ...(q.plan ? { plan: q.plan } : {}),
       ...(q.search
         ? {
             OR: [
@@ -38,7 +42,10 @@ export async function GET(req: Request) {
         orderBy: [{ createdAt: "desc" }, { id: "desc" }],
         skip: (q.page - 1) * ORG_PAGE_SIZE,
         take: ORG_PAGE_SIZE,
-        select: { id: true, name: true, status: true, plan: true, subscriptionStatus: true, paidUntil: true, createdAt: true },
+        select: {
+          id: true, name: true, status: true, plan: true, subscriptionStatus: true, paidUntil: true, createdAt: true,
+          billingCycle: true, subscriptionPriceBdt: true, planRecord: { select: { name: true } },
+        },
       }),
     ]);
 
@@ -67,8 +74,11 @@ export async function GET(req: Request) {
         name: o.name,
         status: o.status as OrgStatus,
         plan: o.plan,
+        planName: o.planRecord.name,
         subscriptionStatus: o.subscriptionStatus as SubscriptionStatus,
         paidUntil: o.paidUntil?.toISOString() ?? null,
+        billingCycle: toBillingCycle(o.billingCycle),
+        subscriptionPriceBdt: o.subscriptionPriceBdt,
         createdAt: o.createdAt.toISOString(),
         counts: {
           admins: users.find((u) => u.organizationId === o.id && u.role === "ADMIN")?._count._all ?? 0,
@@ -88,11 +98,17 @@ export async function GET(req: Request) {
 }
 
 // POST /api/platform/organizations {companyName, adminName, adminEmail, plan, phone?} → CreateOrgResult
+// `plan` must be an ACTIVE plan code; the monthly list price is snapshotted.
 // The temporary password is returned once and never logged.
 export async function POST(req: Request) {
   try {
     const admin = await requirePlatformAdmin();
-    const data = parseBody(createOrgSchema, await readJson<unknown>(req));
+    const body = await readJson<unknown>(req);
+    const activePlans = await db.plan.findMany({ where: { active: true } });
+    const data = parseBody(createOrgSchemaFor(activePlans.map((p) => p.code)), body);
+    const plan = activePlans.find((p) => p.code === data.plan)!;
+    // New accounts start on the monthly cycle at today's list price (null = free).
+    const subscriptionPriceBdt = listPrice(plan, "MONTHLY");
 
     const temporaryPassword = generateTempPassword();
     // Hash outside the transaction so the connection isn't held during scrypt.
@@ -104,7 +120,10 @@ export async function POST(req: Request) {
         const org = await tx.organization.create({
           data: {
             name: data.companyName,
-            plan: data.plan,
+            plan: plan.code,
+            billingCycle: "MONTHLY",
+            subscriptionPriceBdt,
+            planAssignedAt: new Date(),
             phone: data.phone || null,
             contactEmail: data.adminEmail,
             timezone: DEFAULT_TIMEZONE,
@@ -122,7 +141,7 @@ export async function POST(req: Request) {
             mustChangePassword: true,
           },
         });
-        const detail = { companyName: data.companyName, adminEmail: data.adminEmail, plan: data.plan };
+        const detail = { companyName: data.companyName, adminEmail: data.adminEmail, plan: plan.code, billingCycle: "MONTHLY", priceBdt: subscriptionPriceBdt };
         await tx.auditLog.create({
           data: supportAuditData({ organizationId: org.id, action: "ORGANIZATION_CREATED", entityType: "Organization", entityId: org.id, detail }),
         });

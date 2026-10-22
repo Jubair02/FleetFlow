@@ -1,56 +1,51 @@
 // ─────────────────────────────────────────────────────────────
-// Subscription plans & limits.
-// Prices are a PROPOSED hypothesis for Bangladesh — not validated
-// market data. There is no payment integration: plans are changed
-// manually (see docs/BILLING.md).
+// Plan types, feature catalog & labels — client-safe (no server imports).
 //
-// Client-safe: no server imports. Server-side usage and enforcement
-// live in src/lib/plans.ts.
+// Plans themselves live in the database (model Plan) and are edited by
+// platform admins in the /platform console. Prices are a PROPOSED
+// hypothesis for Bangladesh, not validated market data. Billing is manual
+// (docs/BILLING.md); there is no payment integration.
+// Server-side loading & enforcement: src/lib/plans.ts.
 // ─────────────────────────────────────────────────────────────
 
-export type PlanCode = "trial" | "starter" | "growth" | "business";
+/** Plan code = Plan.code (lowercase slug, immutable once created). */
+export type PlanCode = string;
 export type PlanResource = "drivers" | "vehicles" | "admins" | "monthlyDeliveries";
+export type BillingCycle = "MONTHLY" | "ANNUAL";
+
+/**
+ * Feature keys a plan can grant. Only features that are actually gated on
+ * the server are listed here — adding a key without enforcing it would
+ * promise something the product doesn't do.
+ */
+export const FEATURES = {
+  csv_import: { label: "CSV delivery import", description: "Bulk-import deliveries from a spreadsheet" },
+  report_export: { label: "Report CSV export", description: "Download delivery and driver performance reports" },
+  customer_emails: { label: "Customer emails", description: "Email recipients their tracking link and delivery outcome" },
+} as const;
+export type FeatureKey = keyof typeof FEATURES;
+export const FEATURE_KEYS = Object.keys(FEATURES) as FeatureKey[];
 
 export interface PlanDefinition {
   code: PlanCode;
   name: string;
-  /** Proposed monthly price in BDT; null = not sold (trial). */
-  proposedPriceBdt: number | null;
+  description: string | null;
+  /** Monthly list price in BDT; null = not sold monthly (e.g. trial). */
+  monthlyPriceBdt: number | null;
+  /** Annual list price in BDT; null = no annual option. */
+  annualPriceBdt: number | null;
   /** null = unlimited */
   limits: Record<PlanResource, number | null>;
+  features: FeatureKey[];
   highlights: string[];
+  /** Inactive plans can't be newly assigned; existing subscribers keep them. */
+  active: boolean;
+  /** Shown on the public pricing table. */
+  isPublic: boolean;
+  /** Given to self-service sign-ups. Exactly one plan is the default. */
+  isDefault: boolean;
+  sortOrder: number;
 }
-
-export const PLANS: Record<PlanCode, PlanDefinition> = {
-  trial: {
-    code: "trial",
-    name: "Trial",
-    proposedPriceBdt: null,
-    limits: { drivers: 10, vehicles: 10, admins: 3, monthlyDeliveries: 1000 },
-    highlights: ["Everything in Growth while you evaluate", "Manual upgrade when you're ready"],
-  },
-  starter: {
-    code: "starter",
-    name: "Starter",
-    proposedPriceBdt: 1500,
-    limits: { drivers: 5, vehicles: 5, admins: 1, monthlyDeliveries: 500 },
-    highlights: ["Dispatch, driver app & proof of delivery", "Customer tracking links", "Email notifications"],
-  },
-  growth: {
-    code: "growth",
-    name: "Growth",
-    proposedPriceBdt: 4000,
-    limits: { drivers: 20, vehicles: 20, admins: 3, monthlyDeliveries: 3000 },
-    highlights: ["Everything in Starter", "CSV delivery import", "Performance reports & CSV export"],
-  },
-  business: {
-    code: "business",
-    name: "Business",
-    proposedPriceBdt: 9000,
-    limits: { drivers: 50, vehicles: 50, admins: null, monthlyDeliveries: 15000 },
-    highlights: ["Everything in Growth", "Unlimited dispatchers", "Priority support & onboarding help"],
-  },
-};
 
 export const RESOURCE_LABELS: Record<PlanResource, string> = {
   drivers: "active drivers",
@@ -59,7 +54,13 @@ export const RESOURCE_LABELS: Record<PlanResource, string> = {
   monthlyDeliveries: "deliveries this month",
 };
 
-/** Unknown/legacy plan codes fall back to the trial limits rather than failing. */
-export function getPlan(code: string | null | undefined): PlanDefinition {
-  return PLANS[(code ?? "trial").toLowerCase() as PlanCode] ?? PLANS.trial;
+export const PLAN_RESOURCES = Object.keys(RESOURCE_LABELS) as PlanResource[];
+
+export function planHasFeature(plan: Pick<PlanDefinition, "features">, feature: FeatureKey): boolean {
+  return plan.features.includes(feature);
+}
+
+/** List price for a cycle (null = not offered on that cycle). */
+export function listPrice(plan: Pick<PlanDefinition, "monthlyPriceBdt" | "annualPriceBdt">, cycle: BillingCycle): number | null {
+  return cycle === "ANNUAL" ? plan.annualPriceBdt : plan.monthlyPriceBdt;
 }

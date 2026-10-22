@@ -317,5 +317,9 @@ export interface TrackingData {
   expectedAt: string | null;
   createdAt: string;
   failureReason: string | null;
+  /** Set when DELIVERED. */
+  completedAt: string | null;
+  /** The company sending the delivery (company name + public business phone from Settings). */
+  sender: { name: string; phone: string | null };
   timeline: { eventType: string; note: string | null; timestamp: string }[];
 }

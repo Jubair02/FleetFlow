@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { getPlan, PLANS } from "@/lib/plans";
+import type { Plan } from "@prisma/client";
+import { listPrice, planHasFeature, toPlanDefinition } from "@/lib/plans";
 import { startOfMonthInTz, tzOffsetMinutes, zonedTimeToUtc } from "@/lib/timezone";
 
 describe("timezone helpers", () => {
@@ -19,17 +20,29 @@ describe("timezone helpers", () => {
   });
 });
 
-describe("plans", () => {
-  it("falls back to trial for unknown or legacy codes", () => {
-    expect(getPlan(null).code).toBe("trial");
-    expect(getPlan("enterprise-legacy").code).toBe("trial");
-    expect(getPlan("GROWTH").code).toBe("growth");
+const row = (over: Partial<Plan> = {}): Plan => ({
+  code: "growth", name: "Growth", description: null, monthlyPriceBdt: 4000, annualPriceBdt: 40000,
+  maxDrivers: 20, maxVehicles: 20, maxAdmins: 3, maxMonthlyDeliveries: 3000,
+  features: ["csv_import", "report_export", "customer_emails"], highlights: ["a"],
+  active: true, isPublic: true, isDefault: false, sortOrder: 2,
+  createdAt: new Date(), updatedAt: new Date(), ...over,
+});
+
+describe("plans (DB rows)", () => {
+  it("maps a Plan row to a PlanDefinition (null limit = unlimited)", () => {
+    const p = toPlanDefinition(row({ maxAdmins: null }));
+    expect(p.limits).toEqual({ drivers: 20, vehicles: 20, admins: null, monthlyDeliveries: 3000 });
+    expect(p).not.toHaveProperty("createdAt");
   });
-  it("tiers grow monotonically", () => {
-    const order = [PLANS.starter, PLANS.growth, PLANS.business];
-    for (let i = 1; i < order.length; i++) {
-      expect(order[i].proposedPriceBdt!).toBeGreaterThan(order[i - 1].proposedPriceBdt!);
-      expect(order[i].limits.drivers!).toBeGreaterThan(order[i - 1].limits.drivers!);
-    }
+  it("ignores unknown/legacy feature keys so a stale value can't grant anything", () => {
+    const p = toPlanDefinition(row({ features: ["csv_import", "sms", "white_label"] }));
+    expect(p.features).toEqual(["csv_import"]);
+    expect(planHasFeature(p, "csv_import")).toBe(true);
+    expect(planHasFeature(p, "report_export")).toBe(false);
+  });
+  it("list price per billing cycle", () => {
+    const p = toPlanDefinition(row({ annualPriceBdt: null }));
+    expect(listPrice(p, "MONTHLY")).toBe(4000);
+    expect(listPrice(p, "ANNUAL")).toBeNull();
   });
 });

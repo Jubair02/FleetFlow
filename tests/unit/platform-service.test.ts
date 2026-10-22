@@ -4,9 +4,9 @@ vi.mock("@/lib/db", () => ({ db: {} }));
 
 import { ApiError } from "@/lib/api-helpers";
 import {
-  REACTIVATION_DATA, USER_ROW_SELECT, assertCanReactivate, assertCanSuspend, assertPlanChange, auditListQuery, checkDeactivate,
-  createOrgSchema, lastDayKeys, lastMonthKeys, orgActionSchema, orgListQuery, orgSessionsWhere, paged, parseQuery,
-  platformPasswordSchema, resourceForRole, supportAuditData, suspensionData, tallyPlans, userActionSchema, userListQuery,
+  REACTIVATION_DATA, USER_ROW_SELECT, assertCanReactivate, assertCanSuspend, auditListQuery, checkDeactivate,
+  createOrgSchema, createOrgSchemaFor, lastDayKeys, lastMonthKeys, orgActionSchema, orgListQuery, orgSessionsWhere, paged, parseQuery,
+  platformPasswordSchema, resourceForRole, supportAuditData, suspensionData, userActionSchema, userListQuery,
 } from "@/lib/platform-service";
 
 function statusOf(fn: () => unknown): number | "ok" {
@@ -55,16 +55,20 @@ describe("organization actions", () => {
     expect(REACTIVATION_DATA).toEqual({ status: "ACTIVE", suspendedAt: null, suspendedReason: null });
     expect(orgSessionsWhere("org1")).toEqual({ user: { organizationId: "org1" } });
   });
-  it("set-plan refuses the current plan (case-insensitive)", () => {
-    expect(statusOf(() => assertPlanChange("Growth", "growth"))).toBe(409);
-    expect(statusOf(() => assertPlanChange("starter", "growth"))).toBe("ok");
-  });
   it("validates action payloads", () => {
     expect(orgActionSchema.safeParse({ action: "suspend", reason: "no" }).success).toBe(false);
     expect(orgActionSchema.safeParse({ action: "suspend", reason: "x".repeat(301) }).success).toBe(false);
     expect(orgActionSchema.safeParse({ action: "suspend", reason: "Unpaid invoice" }).success).toBe(true);
-    expect(orgActionSchema.safeParse({ action: "set-plan", plan: "platinum" }).success).toBe(false);
-    expect(orgActionSchema.safeParse({ action: "set-plan", plan: "business" }).success).toBe(true);
+    // set-plan: plan existence/activeness is checked against the DB in the route (checkSetPlan)
+    expect(orgActionSchema.safeParse({ action: "set-plan", plan: "business" }).success).toBe(false); // cycle required
+    expect(orgActionSchema.safeParse({ action: "set-plan", plan: "business", billingCycle: "WEEKLY" }).success).toBe(false);
+    expect(orgActionSchema.safeParse({ action: "set-plan", plan: "business", billingCycle: "ANNUAL" }).success).toBe(true);
+    expect(orgActionSchema.safeParse({ action: "set-plan", plan: "Business", billingCycle: "MONTHLY", priceBdt: 3500 }).data)
+      .toMatchObject({ plan: "business", priceBdt: 3500 });
+    expect(orgActionSchema.safeParse({ action: "set-plan", plan: "business", billingCycle: "MONTHLY", priceBdt: null }).success).toBe(true);
+    expect(orgActionSchema.safeParse({ action: "set-plan", plan: "business", billingCycle: "MONTHLY", priceBdt: -1 }).success).toBe(false);
+    expect(orgActionSchema.safeParse({ action: "set-plan", plan: "business", billingCycle: "MONTHLY", priceBdt: 99.5 }).success).toBe(false);
+    expect(orgActionSchema.safeParse({ action: "set-plan", plan: "business", billingCycle: "MONTHLY", priceBdt: "4000" }).success).toBe(false);
     expect(orgActionSchema.safeParse({ action: "delete" }).success).toBe(false);
     const sub = { action: "update-subscription", subscriptionStatus: "ACTIVE", billingNotes: null };
     expect(orgActionSchema.safeParse({ ...sub, paidUntil: "2026-12-31" }).success).toBe(true);
@@ -81,11 +85,15 @@ describe("organization actions", () => {
 });
 
 describe("input schemas", () => {
-  it("create org: normalizes email, requires a catalog plan", () => {
-    const ok = createOrgSchema.parse({ companyName: " Acme ", adminName: "Rina", adminEmail: " Rina@Acme.COM ", plan: "starter" });
-    expect(ok).toMatchObject({ companyName: "Acme", adminEmail: "rina@acme.com" });
+  it("create org: normalizes email, requires an active plan code", () => {
+    const ok = createOrgSchema.parse({ companyName: " Acme ", adminName: "Rina", adminEmail: " Rina@Acme.COM ", plan: "Starter" });
+    expect(ok).toMatchObject({ companyName: "Acme", adminEmail: "rina@acme.com", plan: "starter" });
     expect(createOrgSchema.safeParse({ companyName: "A", adminName: "Rina", adminEmail: "r@a.co", plan: "starter" }).success).toBe(false);
-    expect(createOrgSchema.safeParse({ companyName: "Acme", adminName: "Rina", adminEmail: "r@a.co", plan: "gold" }).success).toBe(false);
+    const active = createOrgSchemaFor(["trial", "starter", "growth"]);
+    expect(active.safeParse({ companyName: "Acme", adminName: "Rina", adminEmail: "r@a.co", plan: "growth" }).success).toBe(true);
+    const bad = active.safeParse({ companyName: "Acme", adminName: "Rina", adminEmail: "r@a.co", plan: "business" }); // inactive / unknown
+    expect(bad.success).toBe(false);
+    expect(bad.error?.issues[0]?.message).toMatch(/active plan/);
   });
   it("platform password: ≥12 chars and different from current", () => {
     expect(platformPasswordSchema.safeParse({ currentPassword: "a", newPassword: "short" }).success).toBe(false);
@@ -112,11 +120,6 @@ describe("input schemas", () => {
 });
 
 describe("aggregation helpers", () => {
-  it("tallyPlans maps case-insensitively and counts unknown codes", () => {
-    const r = tallyPlans([{ plan: "trial", count: 2 }, { plan: "Growth", count: 3 }, { plan: "legacy", count: 1 }]);
-    expect(r.byCode).toEqual({ trial: 2, starter: 0, growth: 3, business: 0 });
-    expect(r.unknown).toBe(1);
-  });
   it("month/day keys are UTC, oldest first, ending now", () => {
     const now = new Date("2026-02-03T05:00:00Z");
     const months = lastMonthKeys(now, 12);

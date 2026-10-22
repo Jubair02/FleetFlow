@@ -3,7 +3,7 @@ import { db } from "@/lib/db";
 import { hashPassword } from "@/lib/auth";
 import { ApiError, fail, ok, readJson, requireAdmin } from "@/lib/api-helpers";
 import { createStaffSchema, firstError } from "@/lib/validation";
-import { assertPlanLimit, getPlan } from "@/lib/plans";
+import { assertPlanLimit, getOrgPlan } from "@/lib/plans";
 import { generateTempPassword } from "@/lib/account";
 import { TX_OPTIONS } from "@/lib/delivery";
 import { auditData } from "@/lib/notify";
@@ -12,13 +12,13 @@ import { auditData } from "@/lib/notify";
 export async function GET() {
   try {
     const user = await requireAdmin();
-    const [admins, org] = await Promise.all([
+    const [admins, plan] = await Promise.all([
       db.user.findMany({
         where: { organizationId: user.organizationId, role: "ADMIN" },
         select: { id: true, name: true, email: true, active: true, mustChangePassword: true, lastLoginAt: true, createdAt: true },
         orderBy: [{ active: "desc" }, { createdAt: "asc" }],
       }),
-      db.organization.findUnique({ where: { id: user.organizationId }, select: { plan: true } }),
+      getOrgPlan(db, user.organizationId),
     ]);
     return ok({
       items: admins.map((a) => ({
@@ -27,7 +27,7 @@ export async function GET() {
         createdAt: a.createdAt.toISOString(),
         isYou: a.id === user.id,
       })),
-      limit: getPlan(org?.plan).limits.admins,
+      limit: plan.limits.admins,
       activeCount: admins.filter((a) => a.active).length,
     });
   } catch (e) {

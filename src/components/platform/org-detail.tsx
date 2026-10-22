@@ -4,6 +4,8 @@ import { useState } from "react";
 import {
   Activity,
   Ban,
+  Check,
+  Minus,
   CreditCard,
   History,
   LoaderCircle,
@@ -14,8 +16,9 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { formatDate, formatDateTime, timeAgo } from "@/lib/format";
-import { getPlan, RESOURCE_LABELS, type PlanCode, type PlanResource } from "@/lib/plan-catalog";
-import type { OrgAction, PlatformOrgDetail, SubscriptionStatus } from "@/lib/platform-types";
+import { FEATURE_KEYS, FEATURES, listPrice, planHasFeature, RESOURCE_LABELS, type BillingCycle, type PlanCode, type PlanResource } from "@/lib/plan-catalog";
+import type { OrgAction, PlatformOrgDetail, PlatformPlansData, SubscriptionStatus } from "@/lib/platform-types";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle, CardAction } from "@/components/ui/card";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -30,16 +33,16 @@ import { bumpPlatformData, platformApi, usePlatformData } from "./platform-api";
 import {
   Callout,
   ConfirmDialog,
+  BILLING_CYCLE_LABELS,
   CopyIdButton,
   EmptyState,
   ErrorState,
   errorProps,
   FieldError,
-  formatBdt,
+  formatPrice,
   humanizeAction,
   OrgStatusBadge,
   parseDetail,
-  PLAN_CODES,
   PlanBadge,
   RoleBadge,
   ServerError,
@@ -114,6 +117,9 @@ function OrgDetailBody({ orgId }: { orgId: string }) {
   const org = data.organization;
   const suspended = org.status === "SUSPENDED";
   const ref = { id: org.id, name: org.name };
+  // A plan with no list price on either cycle is free; otherwise a null list price means "not offered on this cycle".
+  const listOffered = data.planDetail.monthlyPriceBdt != null || data.planDetail.annualPriceBdt != null;
+  const grandfathered = (org.subscriptionPriceBdt ?? null) !== (data.currentListPriceBdt ?? null);
 
   return (
     <div className="flex flex-col">
@@ -122,7 +128,7 @@ function OrgDetailBody({ orgId }: { orgId: string }) {
         <SheetDescription asChild>
           <div className="mt-1 flex flex-wrap items-center gap-2">
             <OrgStatusBadge status={org.status} />
-            <PlanBadge plan={org.plan} />
+            <PlanBadge name={data.planDetail.name} inactive={!data.planDetail.active} />
             <SubscriptionBadge status={org.subscriptionStatus} />
             <CopyIdButton id={org.id} label="organization ID" />
           </div>
@@ -187,11 +193,37 @@ function OrgDetailBody({ orgId }: { orgId: string }) {
           <CardContent className="flex flex-col gap-4 px-4">
             <dl className="divide-y">
               <DetailRow label="Plan">
-                {getPlan(org.plan).name}
-                {getPlan(org.plan).proposedPriceBdt != null && (
-                  <span className="text-muted-foreground"> · {formatBdt(getPlan(org.plan).proposedPriceBdt!)}/mo proposed</span>
+                <span className="font-medium">{data.planDetail.name}</span> <code className="text-[11px] text-muted-foreground">{data.planDetail.code}</code>
+                {!data.planDetail.active && (
+                  <span className="mt-0.5 block text-xs text-muted-foreground">
+                    Inactive plan — this organization keeps it, but it can&apos;t be assigned to anyone new.
+                  </span>
                 )}
               </DetailRow>
+              <DetailRow label="Billing cycle">{BILLING_CYCLE_LABELS[org.billingCycle] ?? org.billingCycle}</DetailRow>
+              <DetailRow label="Agreed price">
+                <span className="tabular-nums">{formatPrice(org.subscriptionPriceBdt, org.billingCycle)}</span>
+                {grandfathered && (
+                  <Badge
+                    variant="outline"
+                    className="ml-2 border-violet-200 bg-violet-50 text-[10px] font-medium text-violet-700 dark:border-violet-800 dark:bg-violet-950/40 dark:text-violet-300"
+                    title="The agreed price differs from the plan's current list price"
+                  >
+                    Grandfathered
+                  </Badge>
+                )}
+              </DetailRow>
+              <DetailRow label="List price">
+                <span className="tabular-nums">
+                  {data.currentListPriceBdt == null && listOffered
+                    ? `Not offered ${org.billingCycle === "ANNUAL" ? "annually" : "monthly"}`
+                    : formatPrice(data.currentListPriceBdt, org.billingCycle)}
+                </span>
+                {grandfathered && (
+                  <span className="block text-xs text-muted-foreground">Current {data.planDetail.name} list price — new assignments get this price.</span>
+                )}
+              </DetailRow>
+              <DetailRow label="Plan assigned">{org.planAssignedAt ? formatDate(org.planAssignedAt) : "—"}</DetailRow>
               <DetailRow label="Subscription">{SUBSCRIPTION_LABELS[org.subscriptionStatus] ?? org.subscriptionStatus}</DetailRow>
               <DetailRow label="Paid until">{org.paidUntil ? formatDate(org.paidUntil) : "—"}</DetailRow>
               <DetailRow label="Billing notes">
@@ -206,6 +238,10 @@ function OrgDetailBody({ orgId }: { orgId: string }) {
                   <UsageBar key={r} label={RESOURCE_LABELS[r]} used={data.usage[r] ?? 0} limit={data.limits[r] ?? null} />
                 ))}
               </ul>
+            </div>
+            <div>
+              <div className="mb-2 text-xs font-medium text-muted-foreground">Features</div>
+              <FeatureList features={data.planDetail.features} />
             </div>
           </CardContent>
         </Card>
@@ -385,65 +421,242 @@ function SuspendDialog({ open, onOpenChange, orgId, orgName }: { open: boolean; 
 
 // ── Change plan ──────────────────────────────────────────────
 
+function FeatureList({ features }: { features: string[] }) {
+  return (
+    <ul className="flex flex-col gap-1 text-sm">
+      {FEATURE_KEYS.map((f) => {
+        const on = features.includes(f);
+        return (
+          <li key={f} className={on ? "flex items-center gap-2" : "flex items-center gap-2 text-muted-foreground"}>
+            {on ? (
+              <Check className="size-4 shrink-0 text-emerald-600 dark:text-emerald-400" aria-hidden />
+            ) : (
+              <Minus className="size-4 shrink-0 opacity-60" aria-hidden />
+            )}
+            <span>{FEATURES[f].label}</span>
+            <span className="sr-only">{on ? "(included)" : "(not included)"}</span>
+          </li>
+        );
+      })}
+    </ul>
+  );
+}
+
+const CYCLES: BillingCycle[] = ["MONTHLY", "ANNUAL"];
+const PRICE_MAX = 10_000_000;
+
+function priceToField(price: number | null): string {
+  return price == null ? "" : String(price);
+}
+
 function ChangePlanDialog({ open, onOpenChange, detail }: { open: boolean; onOpenChange: (o: boolean) => void; detail: PlatformOrgDetail }) {
   const org = detail.organization;
-  const currentCode = getPlan(org.plan).code;
-  const [plan, setPlan] = useState<PlanCode>(currentCode);
-  const next = getPlan(plan);
+  const current = detail.planDetail;
+  const { data: plansData, error: plansError, reload: reloadPlans } = usePlatformData<PlatformPlansData>(open ? "/api/platform/plans" : null);
+  // Active plans can be assigned; the current plan is always listed (even if inactive) so the select can show it.
+  const options = (plansData?.plans ?? []).filter((p) => p.active || p.code === current.code);
+  if (!options.some((p) => p.code === current.code)) options.unshift({ ...current, organizationCount: 0, grandfatheredCount: 0 });
+
+  const [plan, setPlan] = useState<PlanCode>(current.code);
+  const [cycle, setCycle] = useState<BillingCycle>(org.billingCycle);
+  const [price, setPrice] = useState(priceToField(org.subscriptionPriceBdt));
+
+  const next = options.find((p) => p.code === plan) ?? current;
+  const nextList = listPrice(next, cycle);
+
+  /** Re-prefill the price with the list price whenever the plan or cycle changes. */
+  const choose = (nextPlan: PlanCode, nextCycle: BillingCycle) => {
+    setPlan(nextPlan);
+    setCycle(nextCycle);
+    const p = options.find((o) => o.code === nextPlan) ?? current;
+    setPrice(priceToField(listPrice(p, nextCycle)));
+  };
+
+  const trimmed = price.trim().replace(/,/g, "");
+  const parsed = trimmed === "" ? null : Number(trimmed);
+  const priceError =
+    parsed !== null && (!Number.isInteger(parsed) || parsed < 0 || parsed > PRICE_MAX)
+      ? `Enter a whole number of taka (0–${PRICE_MAX.toLocaleString("en-US")}), or leave it empty for free`
+      : undefined;
+  const negotiated = parsed !== (nextList ?? null);
+  const unchanged = plan === current.code && cycle === org.billingCycle && parsed === (org.subscriptionPriceBdt ?? null);
+
   const overLimits = RESOURCE_ORDER.filter((r) => {
     const limit = next.limits[r];
     return limit !== null && (detail.usage[r] ?? 0) > limit;
   });
+  const lostFeatures = FEATURE_KEYS.filter((f) => planHasFeature(current, f) && !planHasFeature(next, f));
+  const cell = "px-3 py-1.5 text-right";
+
   return (
     <ConfirmDialog
       open={open}
       onOpenChange={onOpenChange}
       title={`Change plan for ${org.name}`}
-      confirmLabel="Change plan"
-      canConfirm={plan !== org.plan}
+      confirmLabel={plan === current.code ? "Save subscription" : "Change plan"}
+      canConfirm={!!plansData && next.active && !priceError && !unchanged}
       description="Plan limits apply to new additions only. Existing drivers, vehicles, admins and deliveries are never removed or disabled."
       onConfirm={async () => {
-        await patchOrg(org.id, { action: "set-plan", plan });
-        toast.success(`${org.name} moved to ${next.name}`);
+        await patchOrg(org.id, {
+          action: "set-plan",
+          plan,
+          billingCycle: cycle,
+          // Omitted = snapshot the list price; a number (or null = free) records a negotiated price.
+          ...(negotiated ? { priceBdt: parsed } : {}),
+        });
+        toast.success(plan === current.code ? `${org.name}: subscription updated` : `${org.name} moved to ${next.name}`);
       }}
     >
-      <div className="space-y-1.5">
-        <Label htmlFor="plan-select">New plan</Label>
-        <Select value={plan} onValueChange={(v) => setPlan(v as PlanCode)}>
-          <SelectTrigger id="plan-select" className="w-full">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            {PLAN_CODES.map((c) => {
-              const p = getPlan(c);
-              return (
-                <SelectItem key={c} value={c}>
-                  {p.name}
-                  {p.proposedPriceBdt != null ? ` — ${formatBdt(p.proposedPriceBdt)}/mo (proposed)` : " — free"}
-                  {c === currentCode ? " · current" : ""}
-                </SelectItem>
-              );
-            })}
-          </SelectContent>
-        </Select>
-      </div>
-      <ul className="grid grid-cols-2 gap-x-4 gap-y-1 rounded-lg border bg-muted/30 p-3 text-xs">
-        {RESOURCE_ORDER.map((r) => (
-          <li key={r} className="flex justify-between gap-2">
-            <span className="text-muted-foreground first-letter:uppercase">{RESOURCE_LABELS[r]}</span>
-            <span className="tabular-nums">
-              {detail.usage[r] ?? 0} / {next.limits[r] ?? "∞"}
-            </span>
-          </li>
-        ))}
-      </ul>
-      {overLimits.length > 0 && (
-        <Callout>
-          Current usage is above the {next.name} limit for {overLimits.map((r) => RESOURCE_LABELS[r]).join(", ")}. Nothing is removed, but the
-          company can&apos;t add more of these until usage drops or the plan is raised.
-        </Callout>
+      {plansError && !plansData ? (
+        <ErrorState title="Couldn't load plans" message={plansError} onRetry={reloadPlans} />
+      ) : !plansData ? (
+        <div className="grid gap-2" aria-busy="true">
+          <Skeleton className="h-9 w-full" />
+          <Skeleton className="h-9 w-full" />
+        </div>
+      ) : (
+        <>
+          <div className="grid gap-4 sm:grid-cols-[1fr_10rem]">
+            <div className="space-y-1.5">
+              <Label htmlFor="plan-select">Plan</Label>
+              <Select value={plan} onValueChange={(v) => choose(v, cycle)}>
+                <SelectTrigger id="plan-select" className="w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {options.map((p) => (
+                    <SelectItem key={p.code} value={p.code}>
+                      {p.name}
+                      {p.code === current.code ? " · current" : ""}
+                      {!p.active ? " · inactive" : ""}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="cycle-select">Billing cycle</Label>
+              <Select value={cycle} onValueChange={(v) => choose(plan, v as BillingCycle)}>
+                <SelectTrigger id="cycle-select" className="w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {CYCLES.map((c) => (
+                    <SelectItem key={c} value={c}>
+                      {BILLING_CYCLE_LABELS[c]}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
+
+          {!next.active ? (
+            <Callout tone="zinc">
+              {next.name} is inactive, so it can&apos;t be assigned again — not even to change the cycle or price. The organization keeps it until you
+              move it to an active plan.
+            </Callout>
+          ) : (
+            <div className="space-y-1.5">
+              <Label htmlFor="plan-price">
+                Agreed price per {cycle === "ANNUAL" ? "year" : "month"} <span className="font-normal text-muted-foreground">(BDT)</span>
+              </Label>
+              <div className="flex gap-2">
+                <Input
+                  id="plan-price"
+                  inputMode="numeric"
+                  value={price}
+                  onChange={(e) => setPrice(e.target.value)}
+                  placeholder="Free"
+                  maxLength={12}
+                  {...errorProps("plan-price", priceError)}
+                />
+                {negotiated && (
+                  <Button type="button" variant="ghost" onClick={() => choose(plan, cycle)}>
+                    Use list price
+                  </Button>
+                )}
+              </div>
+              <FieldError id="plan-price-error" message={priceError} />
+              <p className="text-[11px] text-muted-foreground">
+                List price: {nextList == null ? `none ${cycle === "ANNUAL" ? "annually" : "monthly"}` : formatPrice(nextList, cycle)}
+                {negotiated && !priceError ? " · recording a negotiated price" : ""}. Leave empty for free.
+              </p>
+            </div>
+          )}
+
+          <div className="overflow-hidden rounded-lg border text-xs">
+            <table className="w-full">
+              <caption className="sr-only">
+                {current.name} compared with {next.name}
+              </caption>
+              <thead className="bg-muted/40 text-muted-foreground">
+                <tr>
+                  <th scope="col" className="px-3 py-1.5 text-left font-medium">
+                    Limit / feature
+                  </th>
+                  <th scope="col" className={`${cell} font-medium`}>
+                    In use
+                  </th>
+                  <th scope="col" className={`${cell} font-medium`}>
+                    Now · {current.name}
+                  </th>
+                  <th scope="col" className={`${cell} font-medium`}>
+                    New · {next.name}
+                  </th>
+                </tr>
+              </thead>
+              <tbody className="divide-y">
+                {RESOURCE_ORDER.map((r) => {
+                  const over = overLimits.includes(r);
+                  return (
+                    <tr key={r}>
+                      <th scope="row" className="px-3 py-1.5 text-left font-normal first-letter:uppercase">
+                        {RESOURCE_LABELS[r]}
+                      </th>
+                      <td className={`${cell} tabular-nums`}>{detail.usage[r] ?? 0}</td>
+                      <td className={`${cell} tabular-nums text-muted-foreground`}>{current.limits[r] ?? "∞"}</td>
+                      <td className={over ? `${cell} font-medium tabular-nums text-rose-600 dark:text-rose-400` : `${cell} tabular-nums`}>
+                        {next.limits[r] ?? "∞"}
+                        {over && <span className="sr-only"> (usage is over this limit)</span>}
+                      </td>
+                    </tr>
+                  );
+                })}
+                {FEATURE_KEYS.map((f) => {
+                  const had = planHasFeature(current, f);
+                  const has = planHasFeature(next, f);
+                  const lost = lostFeatures.includes(f);
+                  return (
+                    <tr key={f}>
+                      <th scope="row" className="px-3 py-1.5 text-left font-normal">
+                        {FEATURES[f].label}
+                      </th>
+                      <td />
+                      <td className={`${cell} text-muted-foreground`}>{had ? "Yes" : "—"}</td>
+                      <td className={lost ? `${cell} font-medium text-amber-700 dark:text-amber-400` : cell}>{has ? "Yes" : lost ? "Removed" : "—"}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+
+          {overLimits.length > 0 && (
+            <Callout>
+              Current usage is above the {next.name} limit for {overLimits.map((r) => RESOURCE_LABELS[r]).join(", ")}. Nothing is removed, but the
+              company can&apos;t add more of these until usage drops or the plan is raised.
+            </Callout>
+          )}
+          {lostFeatures.length > 0 && (
+            <Callout>
+              {next.name} doesn&apos;t include {lostFeatures.map((f) => FEATURES[f].label.toLowerCase()).join(", ")}. The company loses access straight
+              away; existing data is kept.
+            </Callout>
+          )}
+        </>
       )}
-      <p className="text-[11px] text-muted-foreground">No payment is processed — this only changes the recorded plan and its limits.</p>
+      <Callout tone="zinc">Recorded manually — no payment is processed. This only changes the recorded plan, billing cycle, price and limits.</Callout>
     </ConfirmDialog>
   );
 }

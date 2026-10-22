@@ -3,7 +3,9 @@
 // onboarding (mirror of /api/org, /api/staff, /api/onboarding).
 // ─────────────────────────────────────────────────────────────
 
-/** GET /api/org → { organization } */
+import type { FeatureKey } from "@/lib/plan-catalog";
+
+/** GET /api/org → { organization, planInfo }; PATCH /api/org → { organization } */
 export interface OrgSettings {
   id: string;
   name: string;
@@ -14,6 +16,20 @@ export interface OrgSettings {
   defaultPickupAddress: string | null;
   timezone: string;
   createdAt: string;
+}
+
+/** The organization's plan as far as the company UI needs it (feature gating). */
+export interface OrgPlanInfo {
+  code: string;
+  name: string;
+  /** Features the plan includes; anything missing is refused by the server (403). */
+  features: FeatureKey[];
+}
+
+/** GET /api/org */
+export interface OrgSettingsResponse {
+  organization: OrgSettings;
+  planInfo: OrgPlanInfo;
 }
 
 export type OnboardingStepKey = "company" | "vehicle" | "driver" | "delivery" | "assign" | "team";

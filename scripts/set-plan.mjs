@@ -2,19 +2,27 @@
 // ─────────────────────────────────────────────────────────────
 // Change an organization's subscription plan (manual billing).
 //
-//   node scripts/set-plan.mjs --org <id|exact name> --plan starter|growth|business|trial [--dry-run]
+//   node scripts/set-plan.mjs --org <id|exact name> --plan <code>
+//        [--cycle monthly|annual] [--price <bdt>] [--dry-run]
 //
-// Prints the current plan and usage against the new plan's limits,
-// warns when usage already exceeds them (existing data is NEVER
-// deleted or disabled — only new additions get blocked), then sets
-// Organization.plan and writes one AuditLog row (PLAN_CHANGED).
-// No other writes. --dry-run prints everything and writes nothing.
+// Plans are read from the database (Plan table, managed in /platform → Plans).
+// Same rules as the platform console's set-plan action:
+//   - only ACTIVE plans can be newly assigned (an org may stay on its current
+//     inactive plan while its cycle/price changes);
+//   - price snapshot = --price if given, else the plan's list price for the
+//     cycle; a paid plan without a price for that cycle needs --price; a plan
+//     that is free on both cycles snapshots "free" (null);
+//   - a no-op (same plan, cycle and price) writes nothing.
+// Prints usage against the new plan's limits and warns when usage already
+// exceeds them (existing data is NEVER deleted or disabled — only new
+// additions get blocked). Then sets Organization.plan / billingCycle /
+// subscriptionPriceBdt / planAssignedAt and writes one AuditLog row
+// (PLAN_CHANGED). No other writes. --dry-run prints everything, writes nothing.
 //
-// Plan limits are read from src/lib/plan-catalog.ts (single source of truth).
 // See docs/BILLING.md for the manual billing process.
 // ─────────────────────────────────────────────────────────────
 
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -27,48 +35,61 @@ const RESOURCE_LABELS = {
   admins: "dispatcher/admin accounts",
   monthlyDeliveries: "deliveries this month",
 };
+const MAX_PRICE_BDT = 10_000_000; // same bound as src/lib/platform-service.ts
 
 function usage() {
-  console.log(`Usage: node scripts/set-plan.mjs --org <id|exact name> --plan <code> [--dry-run]
+  console.log(`Usage: node scripts/set-plan.mjs --org <id|exact name> --plan <code> [--cycle monthly|annual] [--price <bdt>] [--dry-run]
 
   --org      Organization id, or its exact name
-  --plan     New plan code (see src/lib/plan-catalog.ts)
+  --plan     Plan code (see /platform → Plans)
+  --cycle    Billing cycle: monthly (default) or annual
+  --price    Agreed price per cycle in whole BDT (default: the plan's list price for the cycle)
   --dry-run  Show the change and usage check without writing anything`);
 }
 
 function parseArgs(argv) {
-  const out = { org: "", plan: "", dryRun: false, help: false };
+  const out = { org: "", plan: "", cycle: "MONTHLY", price: undefined, dryRun: false, help: false };
+  const values = {};
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--dry-run") out.dryRun = true;
     else if (a === "--help" || a === "-h") out.help = true;
-    else if (a === "--org") out.org = (argv[++i] ?? "").trim();
-    else if (a === "--plan") out.plan = (argv[++i] ?? "").trim().toLowerCase();
-    else if (a.startsWith("--org=")) out.org = a.slice(6).trim();
-    else if (a.startsWith("--plan=")) out.plan = a.slice(7).trim().toLowerCase();
-    else throw new Error(`Unknown argument: ${a}`);
+    else {
+      const m = /^--(org|plan|cycle|price)(?:=(.*))?$/.exec(a);
+      if (!m) throw new Error(`Unknown argument: ${a}`);
+      values[m[1]] = m[2] !== undefined ? m[2] : (argv[++i] ?? "");
+    }
+  }
+  if (values.org !== undefined) out.org = values.org.trim();
+  if (values.plan !== undefined) out.plan = values.plan.trim().toLowerCase();
+  if (values.cycle !== undefined) {
+    const c = values.cycle.trim().toUpperCase();
+    if (c !== "MONTHLY" && c !== "ANNUAL") throw new Error(`--cycle must be "monthly" or "annual" (got "${values.cycle}")`);
+    out.cycle = c;
+  }
+  if (values.price !== undefined) {
+    const t = values.price.trim();
+    if (!/^\d+$/.test(t) || Number(t) > MAX_PRICE_BDT) {
+      throw new Error(`--price must be a whole number of taka between 0 and ${MAX_PRICE_BDT} (got "${values.price}")`);
+    }
+    out.price = Number(t);
   }
   return out;
 }
 
-/** Read plan names and limits from src/lib/plan-catalog.ts by parsing the source (no TS loader needed). */
-function loadPlans() {
-  const src = readFileSync(resolve(ROOT, "src/lib/plan-catalog.ts"), "utf8");
-  const plans = {};
-  const block = /code:\s*"(\w+)",\s*name:\s*"([^"]+)",\s*proposedPriceBdt:\s*(null|\d+),\s*limits:\s*\{([^}]*)\}/g;
-  for (const m of src.matchAll(block)) {
-    const limits = {};
-    for (const pair of m[4].matchAll(/(\w+):\s*(null|\d+)/g)) limits[pair[1]] = pair[2] === "null" ? null : Number(pair[2]);
-    plans[m[1]] = { code: m[1], name: m[2], proposedPriceBdt: m[3] === "null" ? null : Number(m[3]), limits };
-  }
-  for (const code of ["trial", "starter", "growth", "business"]) {
-    const p = plans[code];
-    if (!p || RESOURCES.some((r) => !(r in p.limits))) {
-      throw new Error(`Could not read plan "${code}" from src/lib/plan-catalog.ts — has its format changed?`);
-    }
-  }
-  return plans;
+const limitsOf = (p) => ({ drivers: p.maxDrivers, vehicles: p.maxVehicles, admins: p.maxAdmins, monthlyDeliveries: p.maxMonthlyDeliveries });
+const listPrice = (p, cycle) => (cycle === "ANNUAL" ? p.annualPriceBdt : p.monthlyPriceBdt);
+
+/** Same rule as resolveSnapshotPrice() in src/lib/platform-service.ts. */
+function snapshotPrice(plan, cycle, price) {
+  if (price !== undefined) return price;
+  const list = listPrice(plan, cycle);
+  if (list !== null || (plan.monthlyPriceBdt === null && plan.annualPriceBdt === null)) return list;
+  throw new Error(`The ${plan.name} plan has no ${cycle.toLowerCase()} price — use the other --cycle or pass --price`);
 }
+
+const fmtPrice = (n, cycle) => (n === null ? "free" : `৳${n}/${cycle === "ANNUAL" ? "year" : "month"}`);
+const fmtLimit = (n) => (n === null ? "unlimited" : String(n));
 
 // ── Timezone (mirrors src/lib/timezone.ts → startOfMonthInTz) ──
 function tzOffsetMinutes(instant, tz) {
@@ -118,8 +139,6 @@ async function findOrg(db, ref) {
   throw new Error(`No organization with id or exact name "${ref}"`);
 }
 
-const fmtLimit = (n) => (n === null ? "unlimited" : String(n));
-
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   if (args.help || !args.org || !args.plan) {
@@ -127,32 +146,43 @@ async function main() {
     process.exit(args.help ? 0 : 1);
   }
 
-  const plans = loadPlans();
-  const next = plans[args.plan];
-  if (!next) throw new Error(`Unknown plan "${args.plan}". Choose one of: ${Object.keys(plans).join(", ")}`);
-
   if (!process.env.DATABASE_URL && existsSync(resolve(ROOT, ".env"))) process.loadEnvFile?.(resolve(ROOT, ".env"));
   if (!process.env.DATABASE_URL) throw new Error("DATABASE_URL is not set (and no .env found)");
 
   const { PrismaClient } = await import("@prisma/client");
   const db = new PrismaClient({ log: ["error"] });
   try {
+    const plans = await db.plan.findMany({ orderBy: [{ sortOrder: "asc" }, { code: "asc" }] });
+    const next = plans.find((p) => p.code === args.plan);
+    if (!next) throw new Error(`Unknown plan "${args.plan}". Choose one of: ${plans.map((p) => p.code).join(", ")}`);
+
     const org = await findOrg(db, args.org);
-    const current = plans[(org.plan || "trial").toLowerCase()] ?? plans.trial;
+    const current = plans.find((p) => p.code === org.plan);
+    if (!current) throw new Error(`Organization plan "${org.plan}" is not in the Plan table — has the plan migration run?`);
+    if (next.code !== org.plan && !next.active) {
+      throw new Error(`The ${next.name} plan is inactive and can't be newly assigned (activate it in /platform → Plans first)`);
+    }
+    const snapshot = snapshotPrice(next, args.cycle, args.price);
+    const list = listPrice(next, args.cycle);
     const used = await getUsage(db, org.id, org.timezone);
 
     console.log(`Organization : ${org.name} (${org.id})`);
-    console.log(`Current plan : ${current.name} [${org.plan}]`);
-    console.log(`New plan     : ${next.name} [${next.code}]${next.proposedPriceBdt != null ? ` — proposed ৳${next.proposedPriceBdt}/month` : ""}`);
+    console.log(`Current plan : ${current.name} [${org.plan}] — ${org.billingCycle.toLowerCase()}, ${fmtPrice(org.subscriptionPriceBdt, org.billingCycle)}`);
+    console.log(
+      `New plan     : ${next.name} [${next.code}] — ${args.cycle.toLowerCase()}, ${fmtPrice(snapshot, args.cycle)}` +
+        (snapshot !== list ? ` (negotiated; list ${fmtPrice(list, args.cycle)})` : "")
+    );
     console.log("");
     console.log("Usage vs limits (current → new):");
+    const currentLimits = limitsOf(current);
+    const nextLimits = limitsOf(next);
     const over = [];
     for (const r of RESOURCES) {
-      const lim = next.limits[r];
+      const lim = nextLimits[r];
       const exceeds = lim !== null && used[r] > lim;
       if (exceeds) over.push(r);
       console.log(
-        `  ${RESOURCE_LABELS[r].padEnd(28)} ${String(used[r]).padStart(6)}   ${fmtLimit(current.limits[r]).padStart(9)} → ${fmtLimit(lim).padStart(9)}${exceeds ? "   ⚠ OVER" : ""}`
+        `  ${RESOURCE_LABELS[r].padEnd(28)} ${String(used[r]).padStart(6)}   ${fmtLimit(currentLimits[r]).padStart(9)} → ${fmtLimit(lim).padStart(9)}${exceeds ? "   ⚠ OVER" : ""}`
       );
     }
     if (over.length) {
@@ -161,8 +191,8 @@ async function main() {
       console.warn("Existing data is kept untouched; only NEW additions of those resources will be refused until usage drops.");
     }
 
-    if (org.plan === next.code) {
-      console.log("\nNo change: the organization is already on this plan. Nothing written.");
+    if (org.plan === next.code && org.billingCycle === args.cycle && org.subscriptionPriceBdt === snapshot) {
+      console.log("\nNo change: the organization is already on this plan, cycle and price. Nothing written.");
       return;
     }
     if (args.dryRun) {
@@ -171,7 +201,10 @@ async function main() {
     }
 
     await db.$transaction([
-      db.organization.update({ where: { id: org.id }, data: { plan: next.code } }),
+      db.organization.update({
+        where: { id: org.id },
+        data: { plan: next.code, billingCycle: args.cycle, subscriptionPriceBdt: snapshot, planAssignedAt: new Date() },
+      }),
       db.auditLog.create({
         data: {
           organizationId: org.id,
@@ -180,11 +213,17 @@ async function main() {
           action: "PLAN_CHANGED",
           entityType: "Organization",
           entityId: org.id,
-          detail: JSON.stringify({ from: org.plan, to: next.code, usage: used, overLimit: over }),
+          detail: JSON.stringify({
+            from: { plan: org.plan, billingCycle: org.billingCycle, priceBdt: org.subscriptionPriceBdt },
+            to: { plan: next.code, billingCycle: args.cycle, priceBdt: snapshot },
+            listPriceBdt: list,
+            usage: used,
+            overLimit: over,
+          }),
         },
       }),
     ]);
-    console.log(`\nDone: ${org.name} is now on ${next.name}. Audit log entry PLAN_CHANGED written.`);
+    console.log(`\nDone: ${org.name} is now on ${next.name} (${args.cycle.toLowerCase()}, ${fmtPrice(snapshot, args.cycle)}). Audit log entry PLAN_CHANGED written.`);
   } finally {
     await db.$disconnect();
   }

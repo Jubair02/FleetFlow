@@ -3,12 +3,12 @@
 import { format, isValid, parseISO } from "date-fns";
 import { BarChart3 } from "lucide-react";
 import { Area, AreaChart, Bar, BarChart, CartesianGrid, Cell, Pie, PieChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
-import type { PlatformOverview } from "@/lib/platform-types";
+import type { PlatformOverview, PlatformPlansData } from "@/lib/platform-types";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { CHART_TOOLTIP_STYLE, dayTick, dayTooltipLabel } from "@/components/fleetflow/date-range";
 import { usePlatformData } from "./platform-api";
-import { EmptyState, ErrorState, fmtNum, PageHeader, planName, SUBSCRIPTION_LABELS } from "./shared";
+import { EmptyState, ErrorState, fmtNum, PageHeader, SUBSCRIPTION_LABELS } from "./shared";
 
 const COLORS = {
   emerald: "#10b981",
@@ -21,12 +21,8 @@ const COLORS = {
   zincLight: "#a1a1aa",
 } as const;
 
-const PLAN_COLORS: Record<string, string> = {
-  trial: COLORS.zincLight,
-  starter: COLORS.teal,
-  growth: COLORS.emerald,
-  business: COLORS.violet,
-};
+/** Plans are data now — colour them by catalog position, falling back to grey for unknown codes. */
+const PLAN_PALETTE = [COLORS.zincLight, COLORS.teal, COLORS.emerald, COLORS.violet, COLORS.cyan, COLORS.amber, COLORS.rose];
 
 const SUB_COLORS: Record<string, string> = {
   TRIAL: COLORS.zincLight,
@@ -120,6 +116,14 @@ function Distribution({ rows, colorOf, labelOf, noun }: { rows: { key: string; c
 
 export function AnalyticsView() {
   const { data, error, reload } = usePlatformData<PlatformOverview>("/api/platform/overview");
+  // Plan names & order for the "by plan" chart; codes are shown until this loads (or if it fails).
+  const { data: plansData } = usePlatformData<PlatformPlansData>("/api/platform/plans");
+  const planIndex = new Map((plansData?.plans ?? []).map((p, i) => [p.code, { name: p.name, i }]));
+  const planLabel = (code: string) => planIndex.get(code)?.name ?? code;
+  const planColor = (code: string) => {
+    const found = planIndex.get(code);
+    return found ? PLAN_PALETTE[found.i % PLAN_PALETTE.length] : COLORS.zinc;
+  };
 
   if (error && !data) return <ErrorState title="Couldn't load analytics" message={error} onRetry={reload} />;
   if (!data) {
@@ -200,13 +204,13 @@ export function AnalyticsView() {
             <Card>
               <CardHeader>
                 <CardTitle className="text-base">Organizations by plan</CardTitle>
-                <CardDescription className="text-xs">Stored plan code; unknown codes are treated as Trial</CardDescription>
+                <CardDescription className="text-xs">Current plan of each organization</CardDescription>
               </CardHeader>
               <CardContent>
                 <Distribution
                   rows={data.organizations.byPlan.map((p) => ({ key: p.plan, count: p.count }))}
-                  colorOf={(k) => PLAN_COLORS[k.toLowerCase()] ?? COLORS.zinc}
-                  labelOf={planName}
+                  colorOf={planColor}
+                  labelOf={planLabel}
                   noun="organizations"
                 />
               </CardContent>

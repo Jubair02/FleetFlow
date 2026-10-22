@@ -1,6 +1,7 @@
 import { db } from "@/lib/db";
 import { getEmailProvider } from "@/lib/email";
 import { createPrismaOutboxStore, queueAndSend, retryEmails } from "@/lib/email/outbox";
+import type { FeatureKey } from "@/lib/plan-catalog";
 import { customerDeliveredEmail, customerFailedEmail, customerTrackingEmail, trackingUrl } from "@/lib/email/templates";
 
 // ─────────────────────────────────────────────────────────────
@@ -107,9 +108,20 @@ export async function notifyAdmins(
   );
 }
 
-async function companyName(organizationId: string): Promise<string> {
-  const org = await db.organization.findUnique({ where: { id: organizationId }, select: { name: true } });
-  return org?.name?.trim() || "Your sender";
+const CUSTOMER_EMAILS: FeatureKey = "customer_emails";
+
+/**
+ * Sender name for customer emails, or null when the organization's plan
+ * doesn't include customer emails (the email is then skipped silently —
+ * not an error). Staff/driver/admin notifications are never gated.
+ */
+async function customerEmailSender(organizationId: string): Promise<string | null> {
+  const org = await db.organization.findUnique({
+    where: { id: organizationId },
+    select: { name: true, planRecord: { select: { features: true } } },
+  });
+  if (!org?.planRecord?.features.includes(CUSTOMER_EMAILS)) return null;
+  return org.name?.trim() || "Your sender";
 }
 
 export interface CustomerTrackingEmailInput {
@@ -123,13 +135,16 @@ export interface CustomerTrackingEmailInput {
 
 /**
  * Email the delivery recipient their public tracking link (no-op when the
- * delivery has no recipient email). Call after the create has committed.
+ * delivery has no recipient email, or the plan lacks customer_emails).
+ * Call after the create has committed.
  */
 export async function sendCustomerTrackingEmail(input: CustomerTrackingEmailInput): Promise<void> {
   const to = input.recipientEmail?.trim();
   if (!to) return;
+  const sender = await customerEmailSender(input.organizationId);
+  if (sender === null) return; // plan without customer_emails
   const content = customerTrackingEmail({
-    companyName: await companyName(input.organizationId),
+    companyName: sender,
     recipientName: input.recipientName,
     trackingCode: input.trackingCode,
     trackingUrl: trackingUrl(input.trackingToken),
@@ -167,8 +182,10 @@ export interface CustomerOutcomeEmailInput {
 export async function sendCustomerOutcomeEmail(input: CustomerOutcomeEmailInput): Promise<void> {
   const to = input.delivery.recipientEmail?.trim();
   if (!to) return;
+  const sender = await customerEmailSender(input.organizationId);
+  if (sender === null) return; // plan without customer_emails
   const base = {
-    companyName: await companyName(input.organizationId),
+    companyName: sender,
     recipientName: input.delivery.recipientName,
     trackingCode: input.delivery.trackingCode,
   };

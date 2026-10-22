@@ -8,6 +8,7 @@ import { clientIp, sessionUserDto } from "@/lib/account";
 import { TX_OPTIONS } from "@/lib/delivery";
 import { auditData } from "@/lib/notify";
 import { DEFAULT_TIMEZONE } from "@/lib/timezone";
+import { getDefaultPlan, listPrice } from "@/lib/plans";
 
 // Self-service sign-up is on by default; set ALLOW_SIGNUP=false to close it.
 function signupEnabled(): boolean {
@@ -19,7 +20,8 @@ export async function GET() {
   return ok({ enabled: signupEnabled() });
 }
 
-// POST /api/auth/signup — create a company (trial plan) and its first admin, then sign in.
+// POST /api/auth/signup — create a company on the default plan (set in the
+// platform console; "trial" out of the box) and its first admin, then sign in.
 export async function POST(req: Request) {
   try {
     if (!signupEnabled()) {
@@ -44,10 +46,16 @@ export async function POST(req: Request) {
     let userId: string;
     try {
       userId = await db.$transaction(async (tx) => {
+        const plan = await getDefaultPlan(tx);
+        // Monthly cycle at today's list price (null = free, e.g. trial).
+        const subscriptionPriceBdt = listPrice(plan, "MONTHLY");
         const org = await tx.organization.create({
           data: {
             name: data.companyName,
-            plan: "trial",
+            plan: plan.code,
+            billingCycle: "MONTHLY",
+            subscriptionPriceBdt,
+            planAssignedAt: new Date(),
             phone: data.phone || null,
             contactEmail: data.email,
             timezone: DEFAULT_TIMEZONE,
@@ -67,7 +75,7 @@ export async function POST(req: Request) {
           data: auditData({
             organizationId: org.id, actorId: user.id, actorName: user.name,
             action: "ORGANIZATION_CREATED", entityType: "Organization", entityId: org.id,
-            detail: { companyName: data.companyName, adminEmail: data.email, plan: "trial" },
+            detail: { companyName: data.companyName, adminEmail: data.email, plan: plan.code, billingCycle: "MONTHLY", priceBdt: subscriptionPriceBdt },
           }),
         });
         return user.id;

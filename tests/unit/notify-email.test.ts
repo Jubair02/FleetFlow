@@ -38,7 +38,7 @@ beforeEach(() => {
     const call = db.notification.create.mock.calls[Number(where.id.slice(1)) - 1][0].data;
     return { id: where.id, recipientEmail: call.recipientEmail, title: call.title, body: call.body, organization: { name: "Rahman Traders" } };
   });
-  db.organization.findUnique.mockResolvedValue({ name: "Rahman Traders" });
+  db.organization.findUnique.mockResolvedValue({ name: "Rahman Traders", planRecord: { features: ["customer_emails"] } });
 });
 
 describe("customer emails", () => {
@@ -85,6 +85,30 @@ describe("customer emails", () => {
     db.notification.create.mockRejectedValueOnce(Object.assign(new Error("dup"), { code: "P2002", meta: { target: ["dedupeKey"] } }));
     await expect(sendCustomerOutcomeEmail({ organizationId: "org1", delivery, outcome: "DELIVERED", eventKey: "delivered:d1" })).resolves.toBeUndefined();
     expect(db.notification.updateMany).not.toHaveBeenCalled();
+  });
+});
+
+describe("customer emails are a plan feature", () => {
+  it("are skipped silently (no row, no error) when the plan lacks customer_emails", async () => {
+    db.organization.findUnique.mockResolvedValue({ name: "Rahman Traders", planRecord: { features: ["csv_import"] } });
+    await expect(
+      sendCustomerTrackingEmail({ organizationId: "org1", deliveryId: "d1", trackingCode: "FF-AB12", trackingToken: "t", recipientName: "K", recipientEmail: "k@x.com" })
+    ).resolves.toBeUndefined();
+    await expect(sendCustomerOutcomeEmail({ organizationId: "org1", delivery, outcome: "DELIVERED", eventKey: "delivered:d1" })).resolves.toBeUndefined();
+    expect(db.notification.create).not.toHaveBeenCalled();
+  });
+
+  it("checks the organization's own plan", async () => {
+    await sendCustomerOutcomeEmail({ organizationId: "org7", delivery, outcome: "FAILED", eventKey: "failed:e1" });
+    expect(db.organization.findUnique.mock.calls[0][0].where).toEqual({ id: "org7" });
+    expect(db.notification.create).toHaveBeenCalledTimes(1);
+  });
+
+  it("staff/admin notifications are not gated", async () => {
+    db.organization.findUnique.mockResolvedValue({ name: "Rahman Traders", planRecord: { features: [] } });
+    db.user.findMany.mockResolvedValue([{ id: "a1", email: "a1@x.com" }]);
+    await notifyAdmins("org1", { type: "DELIVERED", title: "t", body: "b", deliveryId: "d1" }, { email: true, emailDedupeKey: "delivered:d1" });
+    expect(db.notification.create.mock.calls.map((c) => c[0].data.channel).sort()).toEqual(["EMAIL", "IN_APP"]);
   });
 });
 

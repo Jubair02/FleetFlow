@@ -2,11 +2,11 @@ import { db } from "@/lib/db";
 import { ApiError, fail, ok, readJson } from "@/lib/api-helpers";
 import { clientIp } from "@/lib/account";
 import { table, TX_OPTIONS } from "@/lib/delivery";
-import { getUsage } from "@/lib/plans";
+import { getUsage, listPrice, toPlanDefinition } from "@/lib/plans";
 import { platformAuditData, requirePlatformAdmin } from "@/lib/platform-auth";
 import {
-  REACTIVATION_DATA, USER_ROW_SELECT, assertCanReactivate, assertCanSuspend, assertPlanChange, orgActionSchema,
-  orgSessionsWhere, parseBody, parsePaidUntil, planLimits, supportAuditData, suspensionData, toAuditRow, toUserRow,
+  REACTIVATION_DATA, USER_ROW_SELECT, assertCanReactivate, assertCanSuspend, checkSetPlan, orgActionSchema,
+  orgSessionsWhere, parseBody, parsePaidUntil, supportAuditData, suspensionData, toAuditRow, toBillingCycle, toUserRow,
 } from "@/lib/platform-service";
 import type { OrgStatus, PlatformOrgDetail, SubscriptionStatus } from "@/lib/platform-types";
 
@@ -19,8 +19,10 @@ export async function GET(_req: Request, { params }: Params) {
   try {
     await requirePlatformAdmin();
     const { id } = await params;
-    const org = await db.organization.findUnique({ where: { id } });
+    const org = await db.organization.findUnique({ where: { id }, include: { planRecord: true } });
     if (!org) throw new ApiError(404, "Organization not found");
+    const planDetail = toPlanDefinition(org.planRecord);
+    const billingCycle = toBillingCycle(org.billingCycle);
 
     const [usage, users, activity, actions] = await Promise.all([
       getUsage(db, org.id, org.timezone),
@@ -55,6 +57,9 @@ export async function GET(_req: Request, { params }: Params) {
         subscriptionStatus: org.subscriptionStatus as SubscriptionStatus,
         paidUntil: org.paidUntil?.toISOString() ?? null,
         billingNotes: org.billingNotes,
+        billingCycle,
+        subscriptionPriceBdt: org.subscriptionPriceBdt,
+        planAssignedAt: org.planAssignedAt.toISOString(),
         phone: org.phone,
         contactEmail: org.contactEmail,
         address: org.address,
@@ -62,7 +67,9 @@ export async function GET(_req: Request, { params }: Params) {
         createdAt: org.createdAt.toISOString(),
       },
       usage,
-      limits: planLimits(org.plan),
+      planDetail,
+      currentListPriceBdt: listPrice(planDetail, billingCycle),
+      limits: planDetail.limits,
       users: users.map(toUserRow),
       recentActivity: activity.map((a) => ({ ...a, createdAt: a.createdAt.toISOString() })),
       platformActions: actions.map((a) => toAuditRow(a, names)),
@@ -112,11 +119,23 @@ export async function PATCH(req: Request, { params }: Params) {
           break;
         }
         case "set-plan": {
-          assertPlanChange(org.plan, input.plan);
-          await tx.organization.update({ where: { id }, data: { plan: input.plan } });
+          const row = await tx.plan.findUnique({ where: { code: input.plan } });
+          const target = row ? toPlanDefinition(row) : null;
+          // Only ACTIVE plans can be newly assigned; snapshot = priceBdt ?? list price for the cycle.
+          const { snapshot } = checkSetPlan(org, target, input.billingCycle, input.priceBdt);
+          const listPriceBdt = target ? listPrice(target, input.billingCycle) : null;
+          await tx.organization.update({
+            where: { id },
+            data: { plan: input.plan, billingCycle: input.billingCycle, subscriptionPriceBdt: snapshot, planAssignedAt: new Date() },
+          });
           platformAction = "PLAN_CHANGED";
           tenantAction = "PLAN_CHANGED";
-          detail = { from: org.plan, to: input.plan };
+          detail = {
+            from: { plan: org.plan, billingCycle: org.billingCycle, priceBdt: org.subscriptionPriceBdt },
+            to: { plan: input.plan, billingCycle: input.billingCycle, priceBdt: snapshot },
+            listPriceBdt,
+            negotiated: snapshot !== listPriceBdt,
+          };
           break;
         }
         case "update-subscription": {

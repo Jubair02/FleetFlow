@@ -1,4 +1,5 @@
 import { CSV_MAX_BYTES, CSV_MAX_ROWS, CsvError, isBlankRecord, mapHeader, normalizeHeader, parseCsv, utf8ByteLength } from "@/lib/csv";
+import { MAX_IMPORT_ROWS, type MappedRow } from "@/lib/import-contract";
 import { PRIORITIES, type Priority } from "@/lib/constants";
 import { createDeliverySchema } from "@/lib/validation";
 import { DEFAULT_TIMEZONE, tzOffsetMinutes, zonedTimeToUtc } from "@/lib/timezone";
@@ -8,6 +9,11 @@ import { DEFAULT_TIMEZONE, tzOffsetMinutes, zonedTimeToUtc } from "@/lib/timezon
 // detection. Everything here is PURE (no database access) so it can be unit
 // tested and shared with the browser; the API route does the DB lookups and
 // feeds their results into detectDuplicates().
+//
+// Two inputs share one pipeline: raw CSV text (buildImportPlan, legacy
+// upload path) and rows already mapped to columns by the browser
+// (planFromMappedRows — paste from Excel / Sheets or a mapped CSV; see
+// src/lib/import-contract.ts). Both end in validateRow + detectDuplicates.
 //
 // Decisions (also shown to users in the import dialog):
 //  • A date-only expected_delivery means 18:00 (6 PM, end of business) in
@@ -40,7 +46,8 @@ export const REQUIRED_COLUMNS: readonly ImportColumn[] = ["recipient_name", "rec
 /** Header names accepted for each column (compared after normalizeHeader). */
 export const COLUMN_ALIASES: Record<ImportColumn, readonly string[]> = {
   order_ref: ["order_ref", "order ref", "order_reference", "order no", "order_no", "order number", "order id", "order", "reference", "ref", "invoice", "invoice no", "invoice number"],
-  recipient_name: ["recipient_name", "recipient", "name", "customer", "customer name", "receiver", "receiver name", "consignee"],
+  // Distributors usually deliver to retailers, so "shop"/"store"/"outlet" headers mean the recipient.
+  recipient_name: ["recipient_name", "recipient", "name", "customer", "customer name", "receiver", "receiver name", "consignee", "shop", "shop name", "store", "store name", "outlet", "retailer"],
   recipient_phone: ["recipient_phone", "phone", "mobile", "phone number", "mobile number", "contact", "contact number", "customer phone", "recipient mobile"],
   recipient_email: ["recipient_email", "email", "e-mail", "customer email", "email address"],
   pickup_address: ["pickup_address", "pickup", "pickup location", "from address", "from"],
@@ -95,6 +102,13 @@ export const TEMPLATE_ROWS: string[][] = [
     "2026-10-26",
   ],
 ];
+
+/**
+ * The template's header as one tab-separated line — "Copy headers" puts it
+ * on the clipboard and pasting into Excel / Google Sheets fills one column
+ * per cell.
+ */
+export const TEMPLATE_HEADER_LINE = IMPORT_COLUMNS.join("\t");
 
 // ── Types ────────────────────────────────────────────────────
 
@@ -583,6 +597,171 @@ export function rowsToFix(rows: ImportRow[]): string[][] {
       ...IMPORT_COLUMNS.map((c) => r.raw[c] ?? ""),
       `Row ${r.rowNumber}: ` + r.errors.map((e) => e.message).join("; "),
     ]);
+  }
+  return out;
+}
+
+// ── Mapped rows (paste from Excel / Sheets, or a mapped CSV) ─
+
+/**
+ * Suggested target column for each source column. With a header row, cells
+ * are matched against COLUMN_ALIASES (the first cell wins when two match the
+ * same column — the user can change it); without one, columns are assumed
+ * to be in template order. null = "don't import this column".
+ */
+export function suggestMapping(header: string[] | null, columnCount: number): (ImportColumn | null)[] {
+  const count = Math.max(0, Math.floor(columnCount), header?.length ?? 0);
+  if (!header) return Array.from({ length: count }, (_, i) => IMPORT_COLUMNS[i] ?? null);
+  const lookup = new Map<string, ImportColumn>();
+  for (const col of IMPORT_COLUMNS) {
+    for (const alias of COLUMN_ALIASES[col]) lookup.set(normalizeHeader(alias), col);
+  }
+  const used = new Set<ImportColumn>();
+  return Array.from({ length: count }, (_, i) => {
+    const col = lookup.get(normalizeHeader(header[i] ?? ""));
+    if (!col || used.has(col)) return null;
+    used.add(col);
+    return col;
+  });
+}
+
+export interface MappedPlanOptions extends ImportOptions {
+  /** Most non-blank rows accepted (default MAX_IMPORT_ROWS). */
+  maxRows?: number;
+}
+
+/** Cleaned cells of a mapped row; unknown keys and non-strings are ignored. */
+function rawFromValues(values: MappedRow["values"] | null | undefined): Record<ImportColumn, string> {
+  const raw = {} as Record<ImportColumn, string>;
+  for (const col of IMPORT_COLUMNS) {
+    const v = values?.[col];
+    raw[col] = typeof v === "string" ? cleanCell(v) : "";
+  }
+  return raw;
+}
+
+const isBlankRaw = (raw: Record<ImportColumn, string>) => IMPORT_COLUMNS.every((c) => raw[c] === "");
+
+/** Non-blank rows in sheet order, cells cleaned. */
+function cleanMappedRows(rows: MappedRow[]): { rowNumber: number; raw: Record<ImportColumn, string> }[] {
+  return rows
+    .map((r) => ({ rowNumber: r.rowNumber, raw: rawFromValues(r.values) }))
+    .filter((r) => !isBlankRaw(r.raw))
+    .sort((a, b) => a.rowNumber - b.rowNumber);
+}
+
+/** Error shown on every row when no row has a value for a required column. */
+export function unmappedColumnMessage(col: ImportColumn): string {
+  return `No row has a ${COLUMN_LABELS[col].toLowerCase()} — map the column that holds it`;
+}
+
+/**
+ * Validate rows the client already mapped to columns, with exactly the same
+ * rules as manual creation and the CSV path (validateRow). Throws
+ * ImportFileError for request-level problems (bad / repeated row numbers,
+ * no rows, too many rows). Blank rows are skipped. When NO row has a value
+ * for a required column (typically: the column wasn't mapped), every row
+ * gets an explicit error for it instead of a generic "required".
+ */
+export function planFromMappedRows(rows: MappedRow[], opts: MappedPlanOptions = {}): ImportPlan {
+  const maxRows = opts.maxRows ?? MAX_IMPORT_ROWS;
+  const seen = new Set<number>();
+  for (const r of rows) {
+    if (!Number.isInteger(r.rowNumber) || r.rowNumber < 1) {
+      throw new ImportFileError(`Row number ${String(r.rowNumber)} is not valid — row numbers start at 1`);
+    }
+    if (seen.has(r.rowNumber)) throw new ImportFileError(`Row ${r.rowNumber} was sent twice — each row number must be unique`);
+    seen.add(r.rowNumber);
+  }
+  const data = cleanMappedRows(rows);
+  if (data.length === 0) throw new ImportFileError("There are no delivery rows to import — add at least one row.");
+  if (data.length > maxRows) {
+    throw new ImportFileError(
+      `This import has ${data.length} rows; the limit is ${maxRows} per import. Split it into smaller imports and import them one at a time.`
+    );
+  }
+
+  const unmapped = REQUIRED_COLUMNS.filter((c) => data.every((r) => r.raw[c] === ""));
+  const fileWarnings: string[] = [];
+  if (unmapped.length) {
+    fileWarnings.push(
+      `Required column${unmapped.length > 1 ? "s" : ""} not mapped: ${unmapped.map((c) => COLUMN_LABELS[c]).join(", ")}`
+    );
+  }
+
+  const planRows = data.map(({ rowNumber, raw }) => {
+    const row = validateRow(raw, rowNumber, opts);
+    if (unmapped.length) {
+      row.errors = row.errors.map((e) =>
+        (unmapped as readonly ImportField[]).includes(e.field) ? { ...e, message: unmappedColumnMessage(e.field as ImportColumn) } : e
+      );
+    }
+    return row;
+  });
+  return { rows: planRows, fileWarnings };
+}
+
+/**
+ * Deterministic text of mapped rows for the import fingerprint (the API
+ * hashes it with SHA-256): non-blank rows in row-number order, each as its
+ * cleaned (trimmed) cells in IMPORT_COLUMNS order. Row numbers themselves
+ * are NOT included, so pasting the same rows with or without a header row
+ * gives the same fingerprint; unmapped columns and "" are equivalent.
+ */
+export function canonicalRowsJson(rows: MappedRow[]): string {
+  return JSON.stringify({
+    v: 1,
+    columns: IMPORT_COLUMNS,
+    rows: cleanMappedRows(rows).map((r) => IMPORT_COLUMNS.map((c) => r.raw[c])),
+  });
+}
+
+export const LIKELY_DUPLICATE_OVERRIDE_WARNING = "Imported despite a likely duplicate";
+
+/** Only "likely" duplicates may be imported anyway; exact order_ref matches never. */
+export function isOverridableDuplicate(row: ImportRow): boolean {
+  return row.status === "duplicate" && (row.duplicateOf?.kind === "likely_in_file" || row.duplicateOf?.kind === "likely_existing");
+}
+
+/**
+ * Apply the user's "import anyway" choices (row numbers) to the output of
+ * detectDuplicates(): likely duplicates in the list become valid (with a
+ * warning; duplicateOf is kept for display). Exact order_ref duplicates and
+ * invalid rows are never changed, whatever the client sends.
+ */
+export function applyLikelyDuplicateOverrides(rows: ImportRow[], allowRowNumbers: Iterable<number> | null | undefined): ImportRow[] {
+  const allow = new Set(allowRowNumbers ?? []);
+  if (allow.size === 0) return rows;
+  return rows.map((r) =>
+    isOverridableDuplicate(r) && allow.has(r.rowNumber)
+      ? { ...r, status: "valid" as const, warnings: [...r.warnings, LIKELY_DUPLICATE_OVERRIDE_WARNING] }
+      : r
+  );
+}
+
+/** [2,3,4,7,9,10] → "2-4,7,9-10" (compact form stored in the audit log). */
+export function compressRowNumbers(nums: number[]): string {
+  const sorted = [...new Set(nums)].filter((n) => Number.isInteger(n)).sort((a, b) => a - b);
+  const parts: string[] = [];
+  for (let i = 0; i < sorted.length; ) {
+    let j = i;
+    while (j + 1 < sorted.length && sorted[j + 1] === sorted[j] + 1) j++;
+    parts.push(j === i ? String(sorted[i]) : `${sorted[i]}-${sorted[j]}`);
+    i = j + 1;
+  }
+  return parts.join(",");
+}
+
+/** Inverse of compressRowNumbers; malformed parts are skipped, output is bounded. */
+export function expandRowNumbers(text: string | null | undefined, max = MAX_IMPORT_ROWS * 2): number[] {
+  const out: number[] = [];
+  for (const part of (text ?? "").split(",")) {
+    const m = /^\s*(\d+)(?:-(\d+))?\s*$/.exec(part);
+    if (!m) continue;
+    const from = Number(m[1]);
+    const to = m[2] !== undefined ? Number(m[2]) : from;
+    for (let n = from; n <= to && out.length < max; n++) out.push(n);
+    if (out.length >= max) break;
   }
   return out;
 }

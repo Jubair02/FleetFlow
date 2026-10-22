@@ -4,7 +4,7 @@ import { useState } from "react";
 import { AlertTriangle, Check, ChevronLeft, ChevronRight, Copy, KeyRound, LoaderCircle, RotateCw, ShieldCheck, type LucideIcon } from "lucide-react";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
-import { getPlan, type PlanCode } from "@/lib/plan-catalog";
+import type { BillingCycle } from "@/lib/plan-catalog";
 import type { OrgStatus, SubscriptionStatus } from "@/lib/platform-types";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -21,7 +21,6 @@ import {
 
 // ── Constants & formatting ───────────────────────────────────
 
-export const PLAN_CODES: PlanCode[] = ["trial", "starter", "growth", "business"];
 export const SUBSCRIPTION_STATUSES: SubscriptionStatus[] = ["TRIAL", "ACTIVE", "PAST_DUE", "CANCELLED"];
 
 export const SUBSCRIPTION_LABELS: Record<string, string> = {
@@ -45,9 +44,12 @@ export function shortId(id: string): string {
   return id.length > 10 ? `${id.slice(0, 8)}…` : id;
 }
 
-export function planName(code: string): string {
-  const p = getPlan(code);
-  return p.code === code.toLowerCase() ? p.name : `${code} (unknown → Trial)`;
+export const BILLING_CYCLE_LABELS: Record<BillingCycle, string> = { MONTHLY: "Monthly", ANNUAL: "Annual" };
+export const CYCLE_SUFFIX: Record<BillingCycle, string> = { MONTHLY: "/mo", ANNUAL: "/yr" };
+
+/** "৳1,500/mo" or "Free" (null price). */
+export function formatPrice(amount: number | null | undefined, cycle: BillingCycle): string {
+  return amount == null ? "Free" : `${formatBdt(amount)}${CYCLE_SUFFIX[cycle]}`;
 }
 
 /** "organization.suspend" / "ORG_SUSPENDED" → "Organization suspend" / "Org suspended". */
@@ -123,10 +125,19 @@ export function SubscriptionBadge({ status }: { status: string }) {
   );
 }
 
-export function PlanBadge({ plan }: { plan: string }) {
+/** Plan name badge — pass the display name from the API (planName / planDetail.name). */
+export function PlanBadge({ name, inactive = false }: { name: string; inactive?: boolean }) {
   return (
-    <Badge variant="outline" className="whitespace-nowrap border-primary/20 bg-primary/10 font-medium text-primary">
-      {planName(plan)}
+    <Badge
+      variant="outline"
+      className={cn(
+        "whitespace-nowrap font-medium",
+        inactive ? "border-zinc-200 bg-zinc-100 text-zinc-600 dark:border-zinc-700 dark:bg-zinc-800/60 dark:text-zinc-300" : "border-primary/20 bg-primary/10 text-primary"
+      )}
+      title={inactive ? "This plan is inactive — it can't be assigned to new organizations" : undefined}
+    >
+      {name}
+      {inactive && <span className="font-normal opacity-80"> · inactive</span>}
     </Badge>
   );
 }

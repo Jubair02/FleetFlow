@@ -2,7 +2,9 @@
 // Minimal RFC 4180 CSV reader/writer (no dependencies; shared by the
 // browser and the server). Handles quoted fields, "" escapes, commas and
 // line breaks inside quotes, CRLF / LF / CR line endings, a UTF-8 BOM
-// and trailing blank lines. Pure functions — unit tested in tests/unit.
+// and trailing blank lines. Any single-character delimiter is supported
+// (parseDelimited) so text pasted from Excel / Google Sheets (tab separated)
+// goes through the same reader. Pure functions — unit tested in tests/unit.
 // ─────────────────────────────────────────────────────────────
 
 /** Largest CSV accepted for import (bytes of UTF-8 text). */
@@ -48,6 +50,22 @@ export function normalizeCsvText(text: string): string {
  * Strict where data would be lost: an unclosed quote is an error.
  */
 export function parseCsv(input: string): string[][] {
+  return parseDelimited(input, ",");
+}
+
+/** Delimiters detectDelimiter() can return. */
+export type Delimiter = "\t" | "," | ";";
+
+/**
+ * parseCsv() generalized to any single-character delimiter (tab for text
+ * copied from Excel / Google Sheets, ";" for European-locale CSV). Same
+ * quoting rules: Excel and Sheets quote a copied cell that contains a line
+ * break, tab or quote and double the inner quotes — exactly RFC 4180.
+ */
+export function parseDelimited(input: string, delimiter: string): string[][] {
+  if (delimiter.length !== 1 || delimiter === '"' || delimiter === "\r" || delimiter === "\n") {
+    throw new Error(`Invalid delimiter ${JSON.stringify(delimiter)}`);
+  }
   const text = input.replace(/^﻿/, "");
   const records: string[][] = [];
   let record: string[] = [];
@@ -90,7 +108,7 @@ export function parseCsv(input: string): string[][] {
       i++;
       continue;
     }
-    if (ch === ",") {
+    if (ch === delimiter) {
       endField();
       i++;
       continue;
@@ -121,6 +139,93 @@ export function parseCsv(input: string): string[][] {
 /** True when every cell of a record is empty or whitespace. */
 export function isBlankRecord(record: string[]): boolean {
   return record.every((c) => c.trim() === "");
+}
+
+/**
+ * Guess the delimiter of pasted / uploaded text from its first non-blank
+ * line (quoted sections are skipped, so "Dhaka, 1205" doesn't count):
+ *  • any tab → "\t" (what Excel and Google Sheets put on the clipboard);
+ *  • otherwise the more frequent of "," and ";" — a tie or neither → ",".
+ */
+export function detectDelimiter(text: string): Delimiter {
+  const s = text.replace(/^﻿/, "");
+  let tabs = 0;
+  let commas = 0;
+  let semis = 0;
+  let inQuotes = false;
+  let seenContent = false;
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    if (inQuotes) {
+      if (ch === '"') {
+        if (s[i + 1] === '"') i++;
+        else inQuotes = false;
+      }
+      continue;
+    }
+    if (ch === "\r" || ch === "\n") {
+      if (seenContent) break; // end of the first non-blank line
+      continue;
+    }
+    if (ch === '"') inQuotes = true;
+    else if (ch === "\t") tabs++;
+    else if (ch === ",") commas++;
+    else if (ch === ";") semis++;
+    if (ch !== " ") seenContent = true;
+  }
+  if (tabs > 0) return "\t";
+  return semis > commas ? ";" : ",";
+}
+
+/**
+ * Drop columns on the right that are empty in EVERY record (copying a
+ * selection wider than the data ends each line with extra tabs). Inner
+ * empty columns are kept so column indexes stay stable.
+ */
+export function trimTrailingEmptyColumns(records: string[][]): string[][] {
+  let width = 1;
+  for (const r of records) {
+    for (let c = r.length - 1; c >= width; c--) {
+      if (r[c].trim() !== "") {
+        width = c + 1;
+        break;
+      }
+    }
+  }
+  return records.map((r) => (r.length > width ? r.slice(0, width) : r));
+}
+
+export interface ParsedTable {
+  delimiter: Delimiter;
+  records: string[][];
+}
+
+/**
+ * Parse text pasted from a spreadsheet (or an uploaded .csv / .tsv): detect
+ * the delimiter, parse with RFC 4180 quoting, drop trailing blank lines and
+ * trailing all-empty columns. A "\r" before a line break (Windows
+ * clipboard) is part of the line ending, not data. Throws CsvError for an
+ * unclosed quote.
+ */
+export function parseTable(text: string, delimiter: Delimiter = detectDelimiter(text)): ParsedTable {
+  return { delimiter, records: trimTrailingEmptyColumns(parseDelimited(text, delimiter)) };
+}
+
+/**
+ * True when a record looks like a header row rather than data: cells name at
+ * least two DIFFERENT known columns (compared like mapHeader does).
+ */
+export function looksLikeHeader<K extends string>(record: string[], aliases: Record<K, readonly string[]>): boolean {
+  const lookup = new Map<string, K>();
+  for (const key of Object.keys(aliases) as K[]) {
+    for (const alias of aliases[key]) lookup.set(normalizeHeader(alias), key);
+  }
+  const matched = new Set<K>();
+  for (const cell of record) {
+    const key = lookup.get(normalizeHeader(cell));
+    if (key) matched.add(key);
+  }
+  return matched.size >= 2;
 }
 
 /** Header cell → comparable key: "Order No." / "order_no" / " ORDER-NO " → "order_no". */
