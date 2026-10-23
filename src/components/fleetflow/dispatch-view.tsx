@@ -1,33 +1,14 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { toast } from "sonner";
-import {
-  AlertTriangle,
-  CheckCircle2,
-  Clock,
-  Loader2,
-  RotateCcw,
-  Truck,
-  UserCheck,
-  UserX,
-  Users,
-} from "lucide-react";
+import { AlertTriangle, Loader2, RotateCcw, Users, UserX } from "lucide-react";
 
 import { api, useApiData } from "@/lib/api-client";
-import { goToDelivery, useAppStore } from "@/store/app-store";
-import type { AssignmentHistoryItem, Delivery, DispatchData } from "@/lib/types";
-import { failureReasonLabel } from "@/lib/constants";
-import {
-  AvailabilityBadge,
-  PriorityBadge,
-  StatusBadge,
-  VehicleStatusBadge,
-  VehicleTypeLabel,
-} from "@/components/fleetflow/badges";
-import { friendlyDueDate, initials, timeAgo } from "@/lib/format";
+import { useAppStore } from "@/store/app-store";
+import type { Delivery, DispatchData } from "@/lib/types";
+import { cn } from "@/lib/utils";
 import { AssignDialog } from "@/components/fleetflow/assign-dialog";
-import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -38,42 +19,64 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
+import { Dialog } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Progress } from "@/components/ui/progress";
 import { Skeleton } from "@/components/ui/skeleton";
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
-import { cn } from "@/lib/utils";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { SheetBody, SheetDialogContent, SheetHeader } from "@/components/fleetflow/driver/ui";
+import { CARD_SURFACE } from "@/components/fleetflow/driver/job-utils";
+import { DispatchHero, liveLabel } from "@/components/fleetflow/dispatch/hero";
+import { BulkBar, QueuePanel } from "@/components/fleetflow/dispatch/queue-panel";
+import { RoadPanel } from "@/components/fleetflow/dispatch/road-panel";
+import { FleetPanel } from "@/components/fleetflow/dispatch/fleet-rail";
+import { BulkAssignDialog } from "@/components/fleetflow/dispatch/bulk-assign-dialog";
+import { isDriverFree, type ActiveAssignment } from "@/components/fleetflow/dispatch/helpers";
 
-type ActiveAssignment = AssignmentHistoryItem & { delivery: Delivery };
+type Tab = "queue" | "road";
 
-/** Tracking code that opens the delivery's detail in the Deliveries view. */
-function TrackingLink({ delivery }: { delivery: Delivery }) {
+const POLL_MS = 30_000;
+
+function DispatchSkeleton() {
   return (
-    <button
-      type="button"
-      onClick={() => goToDelivery(delivery.id)}
-      className="rounded-sm font-mono text-sm font-medium hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60"
-      aria-label={`Open delivery ${delivery.trackingCode}`}
-    >
-      {delivery.trackingCode}
-    </button>
+    <div className="mx-auto max-w-7xl space-y-5" aria-busy="true" aria-label="Loading the dispatch board">
+      <Skeleton className="h-[13.5rem] w-full rounded-3xl sm:h-48 lg:h-44" />
+      <div className="grid gap-6 lg:grid-cols-3">
+        <div className="space-y-4 lg:col-span-2">
+          <Skeleton className="h-11 w-64 rounded-xl" />
+          <div className="flex gap-2">
+            <Skeleton className="h-10 flex-1 rounded-xl" />
+            <Skeleton className="hidden h-10 w-40 rounded-xl sm:block" />
+          </div>
+          <div className={cn(CARD_SURFACE, "divide-y divide-border/60 overflow-hidden dark:divide-white/10")}>
+            {Array.from({ length: 6 }).map((_, i) => (
+              <div key={i} className="flex items-center gap-4 px-4 py-4">
+                <Skeleton className="size-5 rounded-md" />
+                <div className="flex-1 space-y-2">
+                  <Skeleton className="h-3.5 w-24" />
+                  <Skeleton className="h-3 w-36" />
+                </div>
+                <Skeleton className="hidden h-3.5 w-48 md:block" />
+                <Skeleton className="hidden h-9 w-20 rounded-xl md:block" />
+              </div>
+            ))}
+          </div>
+        </div>
+        <div className={cn(CARD_SURFACE, "hidden space-y-3 p-4 lg:block")}>
+          <Skeleton className="h-4 w-20" />
+          {Array.from({ length: 5 }).map((_, i) => (
+            <div key={i} className="flex items-center gap-3">
+              <Skeleton className="size-9 rounded-xl" />
+              <div className="flex-1 space-y-2">
+                <Skeleton className="h-3.5 w-28" />
+                <Skeleton className="h-1.5 w-full" />
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -87,14 +90,53 @@ export function DispatchView() {
   const [unassignReason, setUnassignReason] = useState("");
   const [busy, setBusy] = useState(false);
 
+  const [tab, setTab] = useState<Tab>("queue");
+  const [driverFilter, setDriverFilter] = useState<string | null>(null);
+  const [fleetOpen, setFleetOpen] = useState(false);
+  const [selected, setSelected] = useState<Set<string>>(() => new Set());
+  const [bulkTargets, setBulkTargets] = useState<Delivery[]>([]);
+  const [bulkOpen, setBulkOpen] = useState(false);
+
+  // ── Live refresh ────────────────────────────────────────────
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  const [updatedAt, setUpdatedAt] = useState<number | null>(null);
+
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- stamp each successful load
+    if (data) setUpdatedAt(Date.now());
+  }, [data]);
+
+  useEffect(() => {
+    const tick = window.setInterval(() => setNowMs(Date.now()), 15_000);
+    const poll = window.setInterval(() => {
+      if (!document.hidden) void reload();
+    }, POLL_MS);
+    const onVisible = () => {
+      if (document.hidden) return;
+      setNowMs(Date.now());
+      void reload();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      window.clearInterval(tick);
+      window.clearInterval(poll);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, [reload]);
+
+  function refreshNow() {
+    setNowMs(Date.now());
+    void reload();
+  }
+
   const unassigned = data?.unassigned ?? [];
   const assignments = data?.assignments ?? [];
   const drivers = data?.drivers ?? [];
   const vehicles = data?.vehicles ?? [];
 
-  const pendingCount = unassigned.filter((d) => d.status === "CREATED").length;
-  const failedCount = unassigned.filter((d) => d.status === "FAILED").length;
-  const activeCount = assignments.length;
+  // Selection only counts deliveries still in the queue.
+  const queueIds = new Set(unassigned.map((d) => d.id));
+  const effectiveSelected = new Set([...selected].filter((id) => queueIds.has(id)));
 
   async function handleUnassign() {
     if (!unassignTarget) return;
@@ -114,413 +156,188 @@ export function DispatchView() {
     }
   }
 
-  if (loading && !data) {
-    return (
-      <div className="space-y-4">
-        <div className="flex flex-wrap gap-3">
-          {Array.from({ length: 3 }).map((_, i) => (
-            <Skeleton key={i} className="h-20 w-44 rounded-xl" />
-          ))}
-        </div>
-        <Skeleton className="h-72 w-full rounded-xl" />
-        <Skeleton className="h-72 w-full rounded-xl" />
-      </div>
-    );
-  }
+  if (loading && !data) return <DispatchSkeleton />;
 
   if (error && !data) {
     return (
-      <Alert variant="destructive">
-        <AlertTriangle className="size-4" />
-        <AlertTitle>Couldn&apos;t load the dispatch board</AlertTitle>
-        <AlertDescription>
-          <p>{error}</p>
-          <Button variant="outline" size="sm" className="mt-2 min-h-11 sm:min-h-9" onClick={() => void reload()}>
+      <div className="mx-auto max-w-7xl">
+        <div role="alert" className={cn(CARD_SURFACE, "flex flex-col items-center px-6 py-12 text-center")}>
+          <span className="flex size-14 items-center justify-center rounded-2xl bg-rose-50 text-rose-600 dark:bg-rose-950/60 dark:text-rose-400" aria-hidden="true">
+            <AlertTriangle className="size-6" />
+          </span>
+          <h2 className="mt-4 text-lg font-semibold tracking-tight">Couldn&apos;t load the dispatch board</h2>
+          <p className="mt-1 max-w-sm text-sm text-muted-foreground">{error}</p>
+          <Button variant="outline" className="mt-5 min-h-11 rounded-xl sm:min-h-10" onClick={() => void reload()}>
             <RotateCcw /> Retry
           </Button>
-        </AlertDescription>
-      </Alert>
+        </div>
+      </div>
     );
   }
-
-  const now = Date.now();
-  const isOverdue = (d: Delivery) => !!d.expectedAt && new Date(d.expectedAt).getTime() < now;
 
   function openAssign(d: Delivery) {
     setAssignTarget(d);
     setAssignOpen(true);
   }
 
+  function toggle(id: string, checked: boolean) {
+    setSelected((prev) => {
+      const next = new Set([...prev].filter((x) => queueIds.has(x)));
+      if (checked) next.add(id);
+      else next.delete(id);
+      return next;
+    });
+  }
+
+  function toggleMany(ids: string[], checked: boolean) {
+    setSelected((prev) => {
+      const next = new Set([...prev].filter((x) => queueIds.has(x)));
+      for (const id of ids) {
+        if (checked) next.add(id);
+        else next.delete(id);
+      }
+      return next;
+    });
+  }
+
+  function openBulk() {
+    setBulkTargets(unassigned.filter((d) => effectiveSelected.has(d.id)));
+    setBulkOpen(true);
+  }
+
+  function selectDriver(id: string) {
+    setDriverFilter((cur) => (cur === id ? null : id));
+    setTab("road");
+    setFleetOpen(false);
+  }
+
+  const waiting = unassigned.filter((d) => d.status === "CREATED").length;
+  const failed = unassigned.filter((d) => d.status === "FAILED").length;
+  const driversFree = drivers.filter(isDriverFree).length;
+  const driversActive = drivers.filter((d) => d.active).length;
+  const bulkVisible = tab === "queue" && effectiveSelected.size > 0;
+
+  const fleet = (
+    <FleetPanel drivers={drivers} vehicles={vehicles} selectedDriverId={tab === "road" ? driverFilter : null} onSelectDriver={selectDriver} />
+  );
+
   return (
-    <div className="space-y-4">
+    <div className="mx-auto max-w-7xl space-y-5">
+      <DispatchHero
+        waiting={waiting}
+        failed={failed}
+        onRoad={assignments.length}
+        driversFree={driversFree}
+        driversActive={driversActive}
+        live={liveLabel(updatedAt, nowMs)}
+        refreshing={loading}
+        onRefresh={refreshNow}
+      />
+
       {error ? (
-        <Alert variant="destructive">
-          <AlertTriangle className="size-4" />
-          <AlertTitle>Couldn&apos;t refresh the dispatch board — showing the last loaded data</AlertTitle>
-          <AlertDescription>
-            <p>{error}</p>
-            <Button
-              variant="outline"
-              size="sm"
-              className="mt-2 min-h-11 sm:min-h-9"
-              disabled={loading}
-              onClick={() => void reload()}
-            >
-              {loading ? <Loader2 className="animate-spin" /> : <RotateCcw />} Retry
-            </Button>
-          </AlertDescription>
-        </Alert>
+        <div
+          role="alert"
+          className="flex flex-col gap-3 rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-900 sm:flex-row sm:items-center dark:border-rose-900/60 dark:bg-rose-950/40 dark:text-rose-200"
+        >
+          <span className="flex min-w-0 flex-1 items-start gap-2">
+            <AlertTriangle className="mt-0.5 size-4 shrink-0" aria-hidden="true" />
+            <span>
+              <span className="font-semibold">Couldn&apos;t refresh — showing the last loaded data.</span>{" "}
+              <span className="break-words">{error}</span>
+            </span>
+          </span>
+          <Button
+            variant="outline"
+            size="sm"
+            className="min-h-11 shrink-0 rounded-xl border-rose-300 bg-white text-rose-900 hover:bg-rose-100 sm:min-h-9 dark:border-rose-800 dark:bg-transparent dark:text-rose-100 dark:hover:bg-rose-900/40"
+            disabled={loading}
+            onClick={() => void reload()}
+          >
+            {loading ? <Loader2 className="animate-spin" /> : <RotateCcw />} Retry
+          </Button>
+        </div>
       ) : null}
 
-      {/* Stat chips */}
-      <div className="flex flex-wrap gap-3">
-        <Card className="flex min-w-40 flex-1 flex-row items-center gap-3 border-amber-200 bg-amber-50/70 p-4 sm:flex-none dark:border-amber-900 dark:bg-amber-950/20">
-          <span className="flex size-10 shrink-0 items-center justify-center rounded-full bg-amber-100 text-amber-700 dark:bg-amber-900/60 dark:text-amber-300">
-            <Clock className="size-5" aria-hidden />
-          </span>
-          <div>
-            <p className="text-2xl leading-none font-semibold tabular-nums">{pendingCount}</p>
-            <p className="mt-1 text-xs text-muted-foreground">pending assignment</p>
-          </div>
-        </Card>
+      <div className="grid gap-6 lg:grid-cols-3">
+        <div className={cn("min-w-0 lg:col-span-2", bulkVisible && "max-md:pb-24")}>
+          <Tabs value={tab} onValueChange={(v) => setTab(v as Tab)} className="gap-4">
+            <div className="flex flex-wrap items-center gap-2">
+              <TabsList className="h-11 w-full rounded-xl bg-muted/70 p-1 sm:w-fit dark:bg-white/5">
+                <TabsTrigger value="queue" className="rounded-lg px-4 text-sm data-[state=active]:shadow-sm">
+                  Queue <span className="tabular-nums text-muted-foreground">({unassigned.length})</span>
+                </TabsTrigger>
+                <TabsTrigger value="road" className="rounded-lg px-4 text-sm data-[state=active]:shadow-sm">
+                  On the road <span className="tabular-nums text-muted-foreground">({assignments.length})</span>
+                </TabsTrigger>
+              </TabsList>
+              <Button
+                variant="outline"
+                className="h-11 w-full rounded-xl bg-card sm:ml-auto sm:w-auto lg:hidden dark:bg-input/30"
+                onClick={() => setFleetOpen(true)}
+              >
+                <Users aria-hidden="true" />
+                Fleet ·{" "}
+                <span className="tabular-nums">
+                  {driversFree} can take jobs
+                </span>
+              </Button>
+            </div>
 
-        <Card className="flex min-w-40 flex-1 flex-row items-center gap-3 border-rose-200 bg-rose-50/70 p-4 sm:flex-none dark:border-rose-900 dark:bg-rose-950/20">
-          <span className="flex size-10 shrink-0 items-center justify-center rounded-full bg-rose-100 text-rose-700 dark:bg-rose-900/60 dark:text-rose-300">
-            <AlertTriangle className="size-5" aria-hidden />
-          </span>
-          <div>
-            <p className="text-2xl leading-none font-semibold tabular-nums">{failedCount}</p>
-            <p className="mt-1 text-xs text-muted-foreground">failed — awaiting reassignment</p>
-          </div>
-        </Card>
+            <TabsContent value="queue" forceMount className="data-[state=inactive]:hidden">
+              <QueuePanel
+                queue={unassigned}
+                nowMs={nowMs}
+                selected={effectiveSelected}
+                onToggle={toggle}
+                onToggleMany={toggleMany}
+                onAssign={openAssign}
+              />
+            </TabsContent>
+            <TabsContent value="road" forceMount className="data-[state=inactive]:hidden">
+              <RoadPanel
+                assignments={assignments}
+                drivers={drivers}
+                nowMs={nowMs}
+                driverFilter={driverFilter}
+                onClearDriverFilter={() => setDriverFilter(null)}
+                onUnassign={(a) => {
+                  setUnassignTarget(a);
+                  setUnassignReason("");
+                }}
+              />
+            </TabsContent>
+          </Tabs>
 
-        <Card className="flex min-w-40 flex-1 flex-row items-center gap-3 border-emerald-200 bg-emerald-50/70 p-4 sm:flex-none dark:border-emerald-900 dark:bg-emerald-950/20">
-          <span className="flex size-10 shrink-0 items-center justify-center rounded-full bg-emerald-100 text-emerald-700 dark:bg-emerald-900/60 dark:text-emerald-300">
-            <Truck className="size-5" aria-hidden />
-          </span>
-          <div>
-            <p className="text-2xl leading-none font-semibold tabular-nums">{activeCount}</p>
-            <p className="mt-1 text-xs text-muted-foreground">active assignments</p>
+          {bulkVisible ? <BulkBar count={effectiveSelected.size} onAssign={openBulk} onClear={() => setSelected(new Set())} /> : null}
+        </div>
+
+        <aside aria-label="Fleet" className="hidden lg:block">
+          <div className={cn(CARD_SURFACE, "sticky top-[4.5rem] max-h-[calc(100dvh-6rem)] overflow-y-auto overscroll-contain p-4")}>
+            <h2 className="px-1 pb-3 text-base font-semibold tracking-tight">Fleet</h2>
+            {fleet}
           </div>
-        </Card>
+        </aside>
       </div>
 
-      {/* Dispatch queue */}
-      <Card className="gap-0 overflow-hidden py-0">
-        <CardHeader className="border-b">
-          <CardTitle>Dispatch queue</CardTitle>
-          <CardDescription>Pending and failed deliveries awaiting a driver</CardDescription>
-        </CardHeader>
-
-        {unassigned.length === 0 ? (
-          <CardContent className="flex flex-col items-center gap-2 p-8 text-center">
-            <CheckCircle2 className="size-8 text-primary" aria-hidden />
-            <p className="text-sm text-muted-foreground">
-              Queue is clear — every delivery is dispatched 🎉
-            </p>
-          </CardContent>
-        ) : (
-          <>
-            {/* Desktop table */}
-            <CardContent className="hidden p-0 md:block">
-              <Table>
-                <TableHeader>
-                  <TableRow className="hover:bg-transparent">
-                    <TableHead className="px-4">Tracking</TableHead>
-                    <TableHead className="px-4">Recipient</TableHead>
-                    <TableHead className="px-4">Priority</TableHead>
-                    <TableHead className="px-4">Status</TableHead>
-                    <TableHead className="px-4">Expected</TableHead>
-                    <TableHead className="px-4 text-right">Action</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {unassigned.map((d) => (
-                    <TableRow key={d.id} className="hover:bg-accent/50">
-                      <TableCell className="px-4 py-3">
-                        <TrackingLink delivery={d} />
-                      </TableCell>
-                      <TableCell className="px-4 py-3">
-                        <div className="font-medium">{d.recipientName}</div>
-                        {d.status === "FAILED" ? (
-                          <div className="text-xs text-rose-600 dark:text-rose-400">
-                            {failureReasonLabel(d.failureReason)}
-                          </div>
-                        ) : null}
-                      </TableCell>
-                      <TableCell className="px-4 py-3">
-                        <PriorityBadge priority={d.priority} />
-                      </TableCell>
-                      <TableCell className="px-4 py-3">
-                        <StatusBadge status={d.status} />
-                      </TableCell>
-                      <TableCell className="px-4 py-3">
-                        <div>{friendlyDueDate(d.expectedAt)}</div>
-                        {isOverdue(d) ? (
-                          <div className="text-xs font-medium text-rose-600 dark:text-rose-400">Overdue</div>
-                        ) : null}
-                      </TableCell>
-                      <TableCell className="px-4 py-3 text-right">
-                        <Button
-                          size="sm"
-                          className="min-h-11"
-                          onClick={() => openAssign(d)}
-                          aria-label={`Assign ${d.trackingCode}`}
-                        >
-                          <UserCheck /> Assign
-                        </Button>
-                      </TableCell>
-                    </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
-            </CardContent>
-
-            {/* Mobile cards */}
-            <CardContent className="grid gap-3 p-4 md:hidden">
-              {unassigned.map((d) => (
-                <div key={d.id} className="space-y-2 rounded-lg border p-4">
-                  <div className="flex items-center justify-between gap-2">
-                    <TrackingLink delivery={d} />
-                    <StatusBadge status={d.status} />
-                  </div>
-                  <p className="font-medium">{d.recipientName}</p>
-                  {d.status === "FAILED" ? (
-                    <p className="text-xs text-rose-600 dark:text-rose-400">
-                      {failureReasonLabel(d.failureReason)}
-                    </p>
-                  ) : null}
-                  <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
-                    <PriorityBadge priority={d.priority} />
-                    <span>{friendlyDueDate(d.expectedAt)}</span>
-                    {isOverdue(d) ? (
-                      <span className="font-medium text-rose-600 dark:text-rose-400">Overdue</span>
-                    ) : null}
-                  </div>
-                  <Button
-                    size="sm"
-                    className="min-h-11 self-start"
-                    onClick={() => openAssign(d)}
-                    aria-label={`Assign ${d.trackingCode}`}
-                  >
-                    <UserCheck /> Assign
-                  </Button>
-                </div>
-              ))}
-            </CardContent>
-          </>
-        )}
-      </Card>
-
-      {/* Active assignments */}
-      <Card className="gap-0 overflow-hidden py-0">
-        <CardHeader className="border-b">
-          <CardTitle>On the road</CardTitle>
-          <CardDescription>Currently assigned deliveries moving through the pipeline</CardDescription>
-        </CardHeader>
-
-        {assignments.length === 0 ? (
-          <CardContent className="p-8 text-center text-sm text-muted-foreground">
-            No active assignments
-          </CardContent>
-        ) : (
-          <>
-            {/* Desktop table */}
-            <CardContent className="hidden p-0 md:block">
-              <Table>
-                <TableHeader>
-                  <TableRow className="hover:bg-transparent">
-                    <TableHead className="px-4">Delivery</TableHead>
-                    <TableHead className="px-4">Driver</TableHead>
-                    <TableHead className="px-4">Vehicle</TableHead>
-                    <TableHead className="px-4">Status</TableHead>
-                    <TableHead className="px-4">Assigned</TableHead>
-                    <TableHead className="px-4 text-right">Action</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {assignments.map((a) => (
-                    <TableRow key={a.id} className="hover:bg-accent/50">
-                      <TableCell className="px-4 py-3">
-                        <TrackingLink delivery={a.delivery} />
-                        <div className="text-xs text-muted-foreground">{a.delivery.recipientName}</div>
-                      </TableCell>
-                      <TableCell className="px-4 py-3">
-                        <div className="flex items-center gap-2">
-                          <Avatar className="size-8">
-                            <AvatarFallback className="bg-primary/10 text-xs font-medium text-primary">
-                              {initials(a.driverName)}
-                            </AvatarFallback>
-                          </Avatar>
-                          <span className="font-medium">{a.driverName}</span>
-                        </div>
-                      </TableCell>
-                      <TableCell className="px-4 py-3">
-                        <div className="font-mono text-sm">{a.vehicleRegistration}</div>
-                        <div className="text-xs text-muted-foreground">
-                          <VehicleTypeLabel type={a.vehicleType} />
-                        </div>
-                      </TableCell>
-                      <TableCell className="px-4 py-3">
-                        <StatusBadge status={a.delivery.status} />
-                      </TableCell>
-                      <TableCell className="px-4 py-3 text-muted-foreground">{timeAgo(a.assignedAt)}</TableCell>
-                      <TableCell className="px-4 py-3 text-right">
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          className="min-h-11"
-                          aria-label={`Unassign ${a.driverName} from ${a.delivery.trackingCode}`}
-                          onClick={() => {
-                            setUnassignTarget(a);
-                            setUnassignReason("");
-                          }}
-                        >
-                          <UserX /> Unassign
-                        </Button>
-                      </TableCell>
-                    </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
-            </CardContent>
-
-            {/* Mobile cards */}
-            <CardContent className="grid gap-3 p-4 md:hidden">
-              {assignments.map((a) => (
-                <div key={a.id} className="space-y-2 rounded-lg border p-4">
-                  <div className="flex items-center justify-between gap-2">
-                    <TrackingLink delivery={a.delivery} />
-                    <StatusBadge status={a.delivery.status} />
-                  </div>
-                  <p className="text-sm text-muted-foreground">{a.delivery.recipientName}</p>
-                  <div className="flex items-center gap-2">
-                    <Avatar className="size-7">
-                      <AvatarFallback className="bg-primary/10 text-xs font-medium text-primary">
-                        {initials(a.driverName)}
-                      </AvatarFallback>
-                    </Avatar>
-                    <span className="text-sm font-medium">{a.driverName}</span>
-                  </div>
-                  <p className="text-xs text-muted-foreground">
-                    <span className="font-mono">{a.vehicleRegistration}</span> ·{" "}
-                    <VehicleTypeLabel type={a.vehicleType} />
-                  </p>
-                  <p className="text-xs text-muted-foreground">assigned {timeAgo(a.assignedAt)}</p>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className="min-h-11 self-start"
-                    aria-label={`Unassign ${a.driverName} from ${a.delivery.trackingCode}`}
-                    onClick={() => {
-                      setUnassignTarget(a);
-                      setUnassignReason("");
-                    }}
-                  >
-                    <UserX /> Unassign
-                  </Button>
-                </div>
-              ))}
-            </CardContent>
-          </>
-        )}
-      </Card>
-
-      {/* Fleet snapshot */}
-      <Card>
-        <CardHeader>
-          <CardTitle>Fleet snapshot</CardTitle>
-          <CardDescription>Driver workload and vehicle availability right now</CardDescription>
-        </CardHeader>
-        <CardContent className="grid gap-6 md:grid-cols-2">
-          <section aria-labelledby="dispatch-drivers-heading">
-            <h3 id="dispatch-drivers-heading" className="mb-3 flex items-center gap-2 text-sm font-semibold">
-              <Users className="size-4 text-primary" aria-hidden /> Drivers
-            </h3>
-            {drivers.length === 0 ? (
-              <p className="text-sm text-muted-foreground">No drivers yet.</p>
-            ) : (
-              <div className="max-h-96 space-y-2 overflow-y-auto pr-1">
-                {drivers.map((dr) => {
-                  const offDuty = dr.availability === "OFF_DUTY" || !dr.active;
-                  const atCapacity = dr.activeJobs >= dr.maxActiveJobs;
-                  return (
-                    <div
-                      key={dr.id}
-                      className={cn(
-                        "rounded-lg border p-3",
-                        offDuty
-                          ? "border-rose-200/70 bg-rose-50/60 dark:border-rose-900/50 dark:bg-rose-950/20"
-                          : atCapacity
-                            ? "border-amber-200/70 bg-amber-50/60 dark:border-amber-900/50 dark:bg-amber-950/20"
-                            : "",
-                      )}
-                    >
-                      <div className="flex items-center justify-between gap-2">
-                        <span className="truncate text-sm font-medium">{dr.name}</span>
-                        <AvailabilityBadge availability={dr.availability} />
-                      </div>
-                      <div className="mt-2 flex items-center gap-2">
-                        <Progress
-                          value={Math.min(100, (dr.activeJobs / Math.max(1, dr.maxActiveJobs)) * 100)}
-                          aria-label={`${dr.name}: ${dr.activeJobs} of ${dr.maxActiveJobs} active jobs`}
-                          className={cn(
-                            "h-1.5 flex-1",
-                            offDuty && "[&_[data-slot=progress-indicator]]:bg-rose-500",
-                            !offDuty && atCapacity && "[&_[data-slot=progress-indicator]]:bg-amber-500",
-                          )}
-                        />
-                        <span className="text-xs tabular-nums text-muted-foreground">
-                          {dr.activeJobs}/{dr.maxActiveJobs}
-                        </span>
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-          </section>
-
-          <section aria-labelledby="dispatch-vehicles-heading">
-            <h3 id="dispatch-vehicles-heading" className="mb-3 flex items-center gap-2 text-sm font-semibold">
-              <Truck className="size-4 text-primary" aria-hidden /> Vehicles
-            </h3>
-            {vehicles.length === 0 ? (
-              <p className="text-sm text-muted-foreground">No vehicles yet.</p>
-            ) : (
-              <div className="max-h-96 space-y-2 overflow-y-auto pr-1">
-                {vehicles.map((v) => (
-                  <div
-                    key={v.id}
-                    className={cn(
-                      "flex items-center justify-between gap-2 rounded-lg border p-3",
-                      v.status !== "ACTIVE" && "opacity-60",
-                    )}
-                  >
-                    <div className="min-w-0">
-                      <span className="font-mono text-sm font-medium">{v.registrationNumber}</span>
-                      <p className="truncate text-xs text-muted-foreground">
-                        <VehicleTypeLabel type={v.type} />
-                        {v.capacity ? ` · ${v.capacity}` : ""}
-                      </p>
-                    </div>
-                    <div className="flex shrink-0 flex-col items-end gap-1">
-                      <VehicleStatusBadge status={v.status} />
-                      <span className="text-xs tabular-nums text-muted-foreground">
-                        {v.activeJobs} active
-                        {v.currentDriverName ? ` · ${v.currentDriverName}` : ""}
-                      </span>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </section>
-        </CardContent>
-      </Card>
+      {/* Fleet sheet (<lg) */}
+      <Dialog open={fleetOpen} onOpenChange={setFleetOpen}>
+        <SheetDialogContent className="sm:max-w-lg">
+          <SheetHeader title="Fleet" description="Tap a driver to see their deliveries on the road." />
+          <SheetBody>{fleet}</SheetBody>
+        </SheetDialogContent>
+      </Dialog>
 
       {/* Assign dialog (opened from queue rows) */}
       <AssignDialog delivery={assignTarget} open={assignOpen} onOpenChange={setAssignOpen} />
+
+      <BulkAssignDialog
+        open={bulkOpen}
+        onOpenChange={setBulkOpen}
+        deliveries={bulkTargets}
+        drivers={drivers}
+        vehicles={vehicles}
+        onFinished={(failedIds) => setSelected(new Set(failedIds))}
+      />
 
       {/* Unassign dialog */}
       <AlertDialog
@@ -532,7 +349,7 @@ export function DispatchView() {
           }
         }}
       >
-        <AlertDialogContent>
+        <AlertDialogContent className="rounded-2xl">
           <AlertDialogHeader>
             <AlertDialogTitle>Unassign driver?</AlertDialogTitle>
             <AlertDialogDescription>
@@ -549,12 +366,13 @@ export function DispatchView() {
               onChange={(e) => setUnassignReason(e.target.value)}
               maxLength={300}
               placeholder="e.g. Vehicle breakdown, driver shift ended"
+              className="min-h-11 rounded-xl sm:min-h-9"
             />
           </div>
           <AlertDialogFooter>
-            <AlertDialogCancel className="min-h-11 sm:min-h-9">Keep assignment</AlertDialogCancel>
+            <AlertDialogCancel className="min-h-11 rounded-xl sm:min-h-9">Keep assignment</AlertDialogCancel>
             <AlertDialogAction
-              className="min-h-11 sm:min-h-9"
+              className="min-h-11 rounded-xl sm:min-h-9"
               disabled={busy}
               onClick={(e) => {
                 e.preventDefault();

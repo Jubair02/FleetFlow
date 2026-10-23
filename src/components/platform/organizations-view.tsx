@@ -1,153 +1,251 @@
 "use client";
 
 import { useState } from "react";
-import { Building2, LoaderCircle, Plus, Search, X } from "lucide-react";
+import { BadgeCheck, Building2, CreditCard, Download, LoaderCircle, Plus, Users, X } from "lucide-react";
 import { toast } from "sonner";
-import { formatDate, timeAgo } from "@/lib/format";
-import type { CreateOrgResult, Paged, PlatformOrgRow, PlatformPlansData } from "@/lib/platform-types";
+import { downloadCsv } from "@/lib/format";
+import type { CreateOrgResult, PlatformOrgList, PlatformOrgRow, PlatformPlansData } from "@/lib/platform-types";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { useConsole } from "./console-context";
-import { bumpPlatformData, platformApi, useDebounced, usePlatformData, withQuery } from "./platform-api";
-import {
-  CopyIdButton,
-  EMAIL_RE,
-  EmptyState,
-  ErrorState,
-  errorProps,
-  FieldError,
-  fmtNum,
-  OrgStatusBadge,
-  PageHeader,
-  PaginationBar,
-  formatPrice,
-  PlanBadge,
-  ServerError,
-  SubscriptionBadge,
-  TableSkeleton,
-  TempPasswordDialog,
-  type TempPasswordInfo,
-} from "./shared";
+import { bumpPlatformData, errorMessage, platformApi, useDebounced, usePlatformData, withQuery } from "./platform-api";
+import { EMAIL_RE, EmptyState, ErrorState, errorProps, FieldError, fmtNum, ServerError, TempPasswordDialog, type TempPasswordInfo } from "./shared";
+import { DeleteOrgDialog, ReactivateOrgDialog, SuspendOrgDialog } from "./organizations/org-action-dialogs";
+import { ChangePlanDialog } from "./organizations/dialog/change-plan-dialog";
+import { EditOrgDialog } from "./organizations/dialog/edit-org-dialog";
+import { DEFAULT_PAGE_SIZE, exportFilename, orgCsvRows, rowNumber, statusFilterParams, toIsoDay, type PageSize } from "./organizations/org-list-utils";
+import { KpiSkeleton, OrgKpiCard, type RowActionHandlers } from "./organizations/org-parts";
+import { OrgCardList, OrgPagination, OrgResultsSkeleton, OrgTable } from "./organizations/org-results";
+import { EMPTY_FILTERS, hasActiveFilters, OrgToolbar, type OrgFilters } from "./organizations/org-toolbar";
+
+const LIST_URL = "/api/platform/organizations";
+
+type ActionKind = "suspend" | "reactivate" | "edit" | "plan" | "delete";
 
 export function OrganizationsView() {
   const { openOrg } = useConsole();
-  const [search, setSearch] = useState("");
-  const [status, setStatus] = useState("all");
-  const [plan, setPlan] = useState("all");
+  const [filters, setFilters] = useState<OrgFilters>(EMPTY_FILTERS);
   const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState<PageSize>(DEFAULT_PAGE_SIZE);
+  /** Selected rows by id — kept across pages so "Export selected" can span them. */
+  const [selected, setSelected] = useState<Map<string, PlatformOrgRow>>(() => new Map());
+  const [exporting, setExporting] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
   const [createSeq, setCreateSeq] = useState(0);
   const [tempPassword, setTempPassword] = useState<TempPasswordInfo | null>(null);
-  const debouncedSearch = useDebounced(search.trim(), 300);
+  const [action, setAction] = useState<{ kind: ActionKind | null; org: PlatformOrgRow | null; seq: number }>({ kind: null, org: null, seq: 0 });
+  const debouncedSearch = useDebounced(filters.search.trim(), 300);
 
-  const url = withQuery("/api/platform/organizations", {
+  const { status, subscription } = statusFilterParams(filters.status);
+  const from = filters.range?.from ? toIsoDay(filters.range.from) : null;
+  const listParams = {
     search: debouncedSearch,
-    status: status === "all" ? null : status,
-    plan: plan === "all" ? null : plan,
-    page,
-  });
-  const { data, loading, error, reload } = usePlatformData<Paged<PlatformOrgRow>>(url);
+    status,
+    subscription,
+    plan: filters.plan === "all" ? null : filters.plan,
+    from,
+    to: filters.range?.to ? toIsoDay(filters.range.to) : from,
+  };
+  const url = withQuery(LIST_URL, { ...listParams, page, pageSize });
+  const { data, loading, error, reload } = usePlatformData<PlatformOrgList>(url);
   const { data: plansData, error: plansError } = usePlatformData<PlatformPlansData>("/api/platform/plans");
-  const plans = plansData?.plans ?? [];
-  const filtered = !!debouncedSearch || status !== "all" || plan !== "all";
+  const filtered = hasActiveFilters(filters);
+  const rows = data?.items ?? [];
+  const summary = data?.summary ?? null;
+  /** Rows are numbered across pages: page 2 of 20 starts at #21. */
+  const offset = data ? rowNumber(data.page, data.pageSize, 0) - 1 : 0;
 
-  const resetPage = <T,>(setter: (v: T) => void) => (v: T) => {
-    setter(v);
+  const updateFilters = (patch: Partial<OrgFilters>) => {
+    setFilters((f) => ({ ...f, ...patch }));
     setPage(1);
+    setSelected(new Map());
   };
 
+  // ── Selection ──
+  const selectedOnPage = rows.filter((r) => selected.has(r.id)).length;
+  const headerState = selectedOnPage === 0 ? false : selectedOnPage === rows.length ? true : ("indeterminate" as const);
+  const toggle = (row: PlatformOrgRow, checked: boolean) =>
+    setSelected((prev) => {
+      const next = new Map(prev);
+      if (checked) next.set(row.id, row);
+      else next.delete(row.id);
+      return next;
+    });
+  const toggleAll = (checked: boolean) =>
+    setSelected((prev) => {
+      const next = new Map(prev);
+      // A partial page ("indeterminate") selects the rest; a full page clears it.
+      const selectAll = checked && selectedOnPage < rows.length;
+      for (const r of rows) {
+        if (selectAll) next.set(r.id, r);
+        else next.delete(r.id);
+      }
+      return next;
+    });
+
+  // ── Export ──
+  const download = (list: PlatformOrgRow[]) => {
+    downloadCsv(exportFilename(), orgCsvRows(list));
+    toast.success(`Exported ${fmtNum(list.length)} organization${list.length === 1 ? "" : "s"}`);
+  };
+  const exportAll = async () => {
+    setExporting(true);
+    try {
+      const res = await platformApi.get<PlatformOrgList>(withQuery(LIST_URL, { ...listParams, export: 1 }));
+      if (!res.items.length) {
+        toast.info("No organizations match these filters — nothing to export");
+        return;
+      }
+      download(res.items);
+      if (res.total > res.items.length) {
+        toast.warning(`Only the first ${fmtNum(res.items.length)} of ${fmtNum(res.total)} organizations were exported — narrow the filters to export the rest`);
+      }
+    } catch (e) {
+      toast.error(errorMessage(e, "Export failed — try again"));
+    } finally {
+      setExporting(false);
+    }
+  };
+
+  const act = (kind: ActionKind) => (row: PlatformOrgRow) => setAction((a) => ({ kind, org: row, seq: a.seq + 1 }));
+  const handlers: RowActionHandlers = {
+    onView: (row, tab) => openOrg(row.id, tab),
+    onEdit: act("edit"),
+    onChangePlan: act("plan"),
+    onSuspend: act("suspend"),
+    onReactivate: act("reactivate"),
+    onDelete: act("delete"),
+  };
+  const closeAction = (o: boolean) => !o && setAction((a) => ({ ...a, kind: null }));
+  /** A deleted organization can't stay selected for "Export selected". The list itself refreshes via bumpPlatformData(). */
+  const onOrgDeleted = (id: string | undefined) =>
+    id &&
+    setSelected((prev) => {
+      if (!prev.has(id)) return prev;
+      const next = new Map(prev);
+      next.delete(id);
+      return next;
+    });
+
   return (
-    <div>
-      <PageHeader
-        title="Organizations"
-        description="Every company workspace on FleetFlow."
-        actions={
-          <Button
-            onClick={() => {
-              setCreateSeq((n) => n + 1);
-              setCreateOpen(true);
-            }}
-          >
-            <Plus aria-hidden /> Create organization
-          </Button>
-        }
+    <div className="flex flex-col gap-4 sm:gap-5">
+      <header className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+        <div className="min-w-0">
+          <h2 className="text-xl font-semibold tracking-tight text-balance sm:text-2xl">Organizations</h2>
+          <p className="mt-1 max-w-prose text-sm text-pretty text-muted-foreground">
+            Manage all organizations, their subscriptions and usage statistics
+          </p>
+        </div>
+        <Button
+          className="h-11 w-full shrink-0 shadow-sm sm:h-9 sm:w-auto"
+          onClick={() => {
+            setCreateSeq((n) => n + 1);
+            setCreateOpen(true);
+          }}
+        >
+          <Plus aria-hidden /> Add Organization
+        </Button>
+      </header>
+
+      <section aria-label="Organization statistics" className="grid grid-cols-2 gap-3 sm:gap-4 xl:grid-cols-4">
+        {summary ? (
+          <>
+            <OrgKpiCard
+              icon={Building2}
+              label="Total organizations"
+              value={summary.totalOrganizations}
+              delta={summary.newOrganizationsThisWeek}
+              tint="bg-violet-500/10 text-violet-600 dark:text-violet-400"
+            />
+            <OrgKpiCard
+              icon={BadgeCheck}
+              label="Active organizations"
+              value={summary.activeOrganizations}
+              delta={summary.newActiveThisWeek}
+              tint="bg-primary/10 text-primary"
+            />
+            <OrgKpiCard
+              icon={Users}
+              label="Total users"
+              value={summary.totalUsers}
+              delta={summary.newUsersThisWeek}
+              tint="bg-sky-500/10 text-sky-600 dark:text-sky-400"
+            />
+            <OrgKpiCard
+              icon={CreditCard}
+              label="Active subscriptions"
+              value={summary.activeSubscriptions}
+              hint={`of ${fmtNum(summary.totalOrganizations)} organizations`}
+              tint="bg-teal-500/10 text-teal-600 dark:text-teal-400"
+            />
+          </>
+        ) : error && !data ? null : (
+          Array.from({ length: 4 }).map((_, i) => <KpiSkeleton key={i} />)
+        )}
+      </section>
+
+      <OrgToolbar
+        filters={filters}
+        onChange={updateFilters}
+        plans={plansData}
+        plansError={plansError}
+        onExport={exportAll}
+        exporting={exporting}
+        canExport={!!data && data.total > 0}
       />
 
-      <Card className="gap-0 overflow-hidden py-0">
-        <div className="flex flex-col gap-2 border-b p-3 sm:flex-row sm:items-center">
-          <div className="relative flex-1">
-            <Search className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" aria-hidden />
-            <Input
-              value={search}
-              onChange={(e) => resetPage(setSearch)(e.target.value)}
-              placeholder="Search by name or ID…"
-              className="pl-9"
-              aria-label="Search organizations"
-              maxLength={100}
-            />
-          </div>
-          <Select value={status} onValueChange={resetPage(setStatus)}>
-            <SelectTrigger className="w-full sm:w-40" aria-label="Filter by status">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="all">All statuses</SelectItem>
-              <SelectItem value="ACTIVE">Active</SelectItem>
-              <SelectItem value="SUSPENDED">Suspended</SelectItem>
-            </SelectContent>
-          </Select>
-          <Select value={plan} onValueChange={resetPage(setPlan)}>
-            <SelectTrigger className="w-full sm:w-40" aria-label="Filter by plan">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="all">All plans</SelectItem>
-              {plans.map((p) => (
-                <SelectItem key={p.code} value={p.code}>
-                  {p.name}
-                  {!p.active ? " (inactive)" : ""}
-                </SelectItem>
-              ))}
-              {plan !== "all" && !plans.some((p) => p.code === plan) && <SelectItem value={plan}>{plan}</SelectItem>}
-              {plansError && !plansData && (
-                <div className="px-2 py-1.5 text-xs text-muted-foreground" role="note">
-                  Couldn&apos;t load plans
-                </div>
-              )}
-            </SelectContent>
-          </Select>
-          {filtered && (
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => {
-                setSearch("");
-                setStatus("all");
-                setPlan("all");
-                setPage(1);
-              }}
-            >
-              <X aria-hidden /> Clear
-            </Button>
-          )}
+      {selected.size > 0 && (
+        <div
+          className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-xl border border-primary/20 bg-primary/5 px-4 py-2 text-sm"
+          role="status"
+          aria-live="polite"
+        >
+          <span className="font-medium tabular-nums">{fmtNum(selected.size)} selected</span>
+          <span className="text-muted-foreground" aria-hidden>
+            ·
+          </span>
+          <Button variant="ghost" size="sm" className="h-11 px-2 text-primary hover:text-primary lg:h-8" onClick={() => download([...selected.values()])}>
+            <Download aria-hidden /> Export selected
+          </Button>
+          <Button variant="ghost" size="sm" className="h-11 px-2 text-muted-foreground lg:h-8" onClick={() => setSelected(new Map())}>
+            <X aria-hidden /> Clear
+          </Button>
         </div>
+      )}
 
+      <Card className="gap-0 rounded-xl border-border/70 py-0 shadow-sm">
         {error && !data ? (
           <div className="p-4">
             <ErrorState title="Couldn't load organizations" message={error} onRetry={reload} />
           </div>
         ) : !data ? (
-          <TableSkeleton />
-        ) : data.items.length === 0 ? (
+          <OrgResultsSkeleton rows={Math.min(pageSize, 8)} />
+        ) : rows.length === 0 ? (
           <EmptyState
             icon={Building2}
-            title={filtered ? "No organizations match these filters" : "No organizations yet"}
-            description={filtered ? "Try a different search or clear the filters." : "Create the first organization to onboard a customer."}
+            title={data.total > 0 ? "This page is empty" : filtered ? "No organizations match these filters" : "No organizations yet"}
+            description={
+              data.total > 0
+                ? "The list changed since this page loaded."
+                : filtered
+                  ? "Try a different search, plan, status or date range."
+                  : "Add the first organization to onboard a customer."
+            }
+            action={
+              data.total > 0 ? (
+                <Button variant="outline" size="sm" className="mt-2" onClick={() => setPage(1)}>
+                  Go to the first page
+                </Button>
+              ) : filtered ? (
+                <Button variant="outline" size="sm" className="mt-2" onClick={() => updateFilters(EMPTY_FILTERS)}>
+                  <X aria-hidden /> Clear filters
+                </Button>
+              ) : undefined
+            }
           />
         ) : (
           <>
@@ -156,67 +254,44 @@ export function OrganizationsView() {
                 <ErrorState title="Showing the last loaded page" message={error} onRetry={reload} />
               </div>
             )}
-            <Table className={loading ? "opacity-60 transition-opacity" : undefined} aria-busy={loading}>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Organization</TableHead>
-                  <TableHead>Status</TableHead>
-                  <TableHead>Plan</TableHead>
-                  <TableHead>Subscription</TableHead>
-                  <TableHead className="text-right">Admins</TableHead>
-                  <TableHead className="text-right">Drivers</TableHead>
-                  <TableHead className="text-right">Vehicles</TableHead>
-                  <TableHead className="text-right">Deliveries</TableHead>
-                  <TableHead>Created</TableHead>
-                  <TableHead>Last activity</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {data.items.map((o) => (
-                  <TableRow key={o.id} className="cursor-pointer" onClick={() => openOrg(o.id)}>
-                    <TableCell className="max-w-64">
-                      <button
-                        type="button"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          openOrg(o.id);
-                        }}
-                        className="block max-w-full truncate text-left font-medium hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60"
-                      >
-                        {o.name}
-                      </button>
-                      <CopyIdButton id={o.id} label="organization ID" />
-                    </TableCell>
-                    <TableCell>
-                      <OrgStatusBadge status={o.status} />
-                    </TableCell>
-                    <TableCell>
-                      <PlanBadge name={o.planName || o.plan} />
-                      <div className="mt-0.5 text-[11px] text-muted-foreground tabular-nums">{formatPrice(o.subscriptionPriceBdt, o.billingCycle)}</div>
-                    </TableCell>
-                    <TableCell>
-                      <SubscriptionBadge status={o.subscriptionStatus} />
-                      {o.paidUntil && <div className="mt-0.5 text-[11px] text-muted-foreground">until {formatDate(o.paidUntil)}</div>}
-                    </TableCell>
-                    <TableCell className="text-right tabular-nums">{fmtNum(o.counts.admins)}</TableCell>
-                    <TableCell className="text-right tabular-nums">{fmtNum(o.counts.drivers)}</TableCell>
-                    <TableCell className="text-right tabular-nums">{fmtNum(o.counts.vehicles)}</TableCell>
-                    <TableCell className="text-right tabular-nums">
-                      {fmtNum(o.counts.deliveries)}
-                      <div className="text-[11px] text-muted-foreground">{fmtNum(o.counts.deliveriesThisMonth)} this month</div>
-                    </TableCell>
-                    <TableCell className="whitespace-nowrap text-muted-foreground">{formatDate(o.createdAt)}</TableCell>
-                    <TableCell className="whitespace-nowrap text-muted-foreground">{o.lastActivityAt ? timeAgo(o.lastActivityAt) : "Never"}</TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
+            <OrgTable rows={rows} loading={loading} isSelected={(id) => selected.has(id)} onToggle={toggle} headerState={headerState} onToggleAll={toggleAll} handlers={handlers} offset={offset} />
+            <OrgCardList rows={rows} loading={loading} isSelected={(id) => selected.has(id)} onToggle={toggle} headerState={headerState} onToggleAll={toggleAll} handlers={handlers} offset={offset} />
           </>
         )}
         {data && data.total > 0 && (
-          <PaginationBar page={data.page} pageCount={data.pageCount} total={data.total} pageSize={data.pageSize} noun="organizations" onPage={setPage} disabled={loading} />
+          <OrgPagination
+            page={data.page}
+            pageCount={data.pageCount}
+            pageSize={pageSize}
+            total={data.total}
+            onPage={setPage}
+            onPageSize={(s) => {
+              setPageSize(s);
+              setPage(1);
+            }}
+            disabled={loading}
+          />
+        )}
+        {loading && data && (
+          <span className="sr-only" role="status">
+            Loading organizations…
+          </span>
         )}
       </Card>
+
+      <SuspendOrgDialog key={`s-${action.seq}`} open={action.kind === "suspend"} org={action.org} onOpenChange={closeAction} />
+      <ReactivateOrgDialog key={`r-${action.seq}`} open={action.kind === "reactivate"} org={action.org} onOpenChange={closeAction} />
+      <DeleteOrgDialog
+        key={`d-${action.seq}`}
+        open={action.kind === "delete"}
+        org={action.org}
+        onOpenChange={closeAction}
+        onSuspendInstead={() => action.org && act("suspend")(action.org)}
+        onDeleted={() => onOrgDeleted(action.org?.id)}
+      />
+      {/* These load the organization's detail themselves (usage, limits, profile). */}
+      <EditOrgDialog key={`e-${action.seq}`} open={action.kind === "edit"} orgId={action.org?.id ?? null} onOpenChange={closeAction} />
+      <ChangePlanDialog key={`p-${action.seq}`} open={action.kind === "plan"} orgId={action.org?.id ?? null} onOpenChange={closeAction} />
 
       <CreateOrgDialog
         key={createSeq}
@@ -376,7 +451,7 @@ function CreateOrgDialog({
             </div>
           </div>
           <p className="text-[11px] text-muted-foreground">
-            The plan&apos;s current list price is recorded. Change the billing cycle or record a negotiated price later from the organization panel.
+            The plan&apos;s current list price is recorded. Change the billing cycle or record a negotiated price later with Change plan.
           </p>
           <ServerError message={serverError} />
           <DialogFooter>

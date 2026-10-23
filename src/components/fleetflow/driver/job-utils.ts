@@ -1,5 +1,6 @@
 import { format, isToday, isYesterday } from "date-fns";
 import type { Delivery, MyJob } from "@/lib/types";
+import { deadlineMs } from "@/lib/format";
 
 /** Shared card surface for the driver portal (soft layered shadow in light, border-only in dark). */
 export const CARD_SURFACE =
@@ -21,7 +22,7 @@ export function now(): Date {
 export function isOverdue(job: Delivery): boolean {
   if (!job.expectedAt) return false;
   if (job.status === "DELIVERED" || job.status === "FAILED" || job.status === "CANCELLED") return false;
-  return new Date(job.expectedAt).getTime() < Date.now();
+  return deadlineMs(job.expectedAt) < Date.now();
 }
 
 /** How THIS driver's assignment ended — not the delivery's current status (it may have been reassigned since). */

@@ -113,6 +113,53 @@
   --sidebar-ring: oklch(0.596 0.145 163.225);
 }
 
+/*
+ * Premium sidebar (shared by the company app and the platform console).
+ * The panel is a deep navy surface in BOTH themes; all text tokens are
+ * ≥4.5:1 on it (slate-300 ≈ 12:1, slate-400 ≈ 7:1).
+ */
+:root {
+  --ff-sidebar-bg: #0b1324;
+  --ff-sidebar-bg-2: #0e1a2b;
+  --ff-sidebar-fg: #cbd5e1;
+  --ff-sidebar-fg-strong: #ffffff;
+  --ff-sidebar-muted: #94a3b8;
+  --ff-sidebar-border: rgb(255 255 255 / 0.06);
+  --ff-sidebar-hover: rgb(255 255 255 / 0.05);
+  --ff-sidebar-raised: rgb(255 255 255 / 0.035);
+}
+
+.dark {
+  --ff-sidebar-bg: #090f1d;
+  --ff-sidebar-bg-2: #0c1626;
+  --ff-sidebar-border: rgb(255 255 255 / 0.08);
+}
+
+/* Accent per shell. Active pills keep white text ≥4.5:1 (emerald-700 5.5:1, violet-600 5.7:1). */
+[data-ff-accent="emerald"] {
+  --ff-sidebar-accent: #047857;
+  --ff-sidebar-accent-strong: #10b981;
+  --ff-sidebar-accent-fg: #6ee7b7;
+  --ff-sidebar-accent-soft: rgb(16 185 129 / 0.14);
+  --ff-sidebar-accent-shadow: rgb(16 185 129 / 0.38);
+  --ff-sidebar-glow: rgb(16 185 129 / 0.16);
+}
+
+[data-ff-accent="violet"] {
+  --ff-sidebar-accent: #7c3aed;
+  --ff-sidebar-accent-strong: #8b5cf6;
+  --ff-sidebar-accent-fg: #c4b5fd;
+  --ff-sidebar-accent-soft: rgb(139 92 246 / 0.16);
+  --ff-sidebar-accent-shadow: rgb(139 92 246 / 0.42);
+  --ff-sidebar-glow: rgb(139 92 246 / 0.18);
+}
+
+[data-ff-accent] {
+  --ff-sidebar-surface:
+    radial-gradient(130% 55% at 0% 0%, var(--ff-sidebar-glow) 0%, transparent 62%),
+    linear-gradient(180deg, var(--ff-sidebar-bg) 0%, var(--ff-sidebar-bg-2) 100%);
+}
+
 @layer base {
   * {
     @apply border-border outline-ring/50;

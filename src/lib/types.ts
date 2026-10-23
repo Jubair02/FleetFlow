@@ -221,6 +221,11 @@ export interface DashboardStats {
 export interface DashboardData {
   stats: DashboardStats;
   daily: { date: string; total: number; completed: number; failed: number }[];
+  /** The viewer's local today (same buckets as `daily`): created, delivered, failed attempts. */
+  today?: { created: number; delivered: number; failed: number };
+  /** Live counts. Overdue = active (CREATED/ASSIGNED/PICKED_UP/IN_TRANSIT) past its deadline — a date-only
+   * deadline lasts the whole local day. dueToday = active, due on local today and not yet overdue. */
+  now?: { waiting: number; onTheRoad: number; overdue: number; dueToday: number };
   statusBreakdown: { status: string; count: number }[];
   priorityBreakdown: { priority: string; count: number }[];
   recentEvents: { id: string; eventType: string; note: string | null; actorName: string | null; createdAt: string; trackingCode: string; deliveryId: string }[];
@@ -231,6 +236,8 @@ export interface DashboardData {
     failedDeliveries: { id: string; trackingCode: string; recipientName: string; failureReason: string | null; createdAt: string }[];
     pendingUrgent: { id: string; trackingCode: string; recipientName: string; priority: string; expectedAt: string | null }[];
     maintenanceVehicles: { id: string; registrationNumber: string; type: string; status: string; notes: string | null }[];
+    /** Most overdue first, capped at 5 — the true count is `now.overdue`. */
+    overdueDeliveries?: { id: string; trackingCode: string; recipientName: string; status: string; expectedAt: string | null }[];
   };
   driverWorkload: { id: string; name: string; active: boolean; availability: string; activeJobs: number; maxActiveJobs: number }[];
 }

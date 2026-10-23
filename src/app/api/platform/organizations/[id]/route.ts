@@ -5,10 +5,12 @@ import { table, TX_OPTIONS } from "@/lib/delivery";
 import { getUsage, listPrice, toPlanDefinition } from "@/lib/plans";
 import { platformAuditData, requirePlatformAdmin } from "@/lib/platform-auth";
 import {
-  REACTIVATION_DATA, USER_ROW_SELECT, assertCanReactivate, assertCanSuspend, checkSetPlan, orgActionSchema,
-  orgSessionsWhere, parseBody, parsePaidUntil, supportAuditData, suspensionData, toAuditRow, toBillingCycle, toUserRow,
+  ORG_DELETE_TX_OPTIONS, PROFILE_UPDATED_NOTE, REACTIVATION_DATA, USER_ROW_SELECT, assertCanDelete, assertCanReactivate, assertCanSuspend, checkSetPlan,
+  daysBefore, deleteOrgData, deleteOrgSchema, orgActionSchema, orgDeletionWhere, orgSessionsWhere, parseBody, parsePaidUntil, profileChanges, successRate,
+  supportAuditData, suspensionData, toAuditRow, toBillingCycle, toUserRow,
 } from "@/lib/platform-service";
-import type { OrgStatus, PlatformOrgDetail, SubscriptionStatus } from "@/lib/platform-types";
+import { deletePodFile } from "@/lib/storage";
+import type { OrgDeleteResult, OrgStatus, PlatformOrgDetail, SubscriptionStatus } from "@/lib/platform-types";
 
 type Params = { params: Promise<{ id: string }> };
 
@@ -24,7 +26,8 @@ export async function GET(_req: Request, { params }: Params) {
     const planDetail = toPlanDefinition(org.planRecord);
     const billingCycle = toBillingCycle(org.billingCycle);
 
-    const [usage, users, activity, actions] = await Promise.all([
+    const since30d = daysBefore(new Date(), 30);
+    const [usage, users, activity, actions, roleCounts, statusCounts] = await Promise.all([
       getUsage(db, org.id, org.timezone),
       db.user.findMany({
         where: { organizationId: org.id },
@@ -43,7 +46,15 @@ export async function GET(_req: Request, { params }: Params) {
         orderBy: [{ createdAt: "desc" }, { id: "desc" }],
         take: 20,
       }),
+      // Every account (active or not) by role — not capped like `users`.
+      db.user.groupBy({ by: ["role"], where: { organizationId: org.id }, _count: { _all: true } }),
+      db.delivery.groupBy({ by: ["status"], where: { organizationId: org.id, createdAt: { gte: since30d } }, _count: { _all: true } }),
     ]);
+
+    const roleCount = (role: string) => roleCounts.find((r) => r.role === role)?._count._all ?? 0;
+    const statusCount = (status: string) => statusCounts.find((r) => r.status === status)?._count._all ?? 0;
+    const delivered30d = statusCount("DELIVERED");
+    const failed30d = statusCount("FAILED");
 
     const names = new Map([[org.id, org.name]]);
     const body: PlatformOrgDetail = {
@@ -65,8 +76,16 @@ export async function GET(_req: Request, { params }: Params) {
         address: org.address,
         timezone: org.timezone,
         createdAt: org.createdAt.toISOString(),
+        defaultPickupAddress: org.defaultPickupAddress,
       },
       usage,
+      stats: {
+        users: { admins: roleCount("ADMIN"), drivers: roleCount("DRIVER"), total: roleCounts.reduce((n, r) => n + r._count._all, 0) },
+        deliveries30d: statusCounts.reduce((n, r) => n + r._count._all, 0),
+        delivered30d,
+        failed30d,
+        successRate30d: successRate(delivered30d, failed30d),
+      },
       planDetail,
       currentListPriceBdt: listPrice(planDetail, billingCycle),
       limits: planDetail.limits,
@@ -80,7 +99,7 @@ export async function GET(_req: Request, { params }: Params) {
   }
 }
 
-// PATCH /api/platform/organizations/[id] — OrgAction → { success }
+// PATCH /api/platform/organizations/[id] — OrgAction → { success } ("update-profile" adds { changed })
 // Every write is scoped to this organization (where: { id } / { organizationId: id }).
 export async function PATCH(req: Request, { params }: Params) {
   try {
@@ -89,7 +108,7 @@ export async function PATCH(req: Request, { params }: Params) {
     const input = parseBody(orgActionSchema, await readJson<unknown>(req));
     const ip = clientIp(req);
 
-    await db.$transaction(async (tx) => {
+    const changed = await db.$transaction(async (tx): Promise<string[] | undefined> => {
       // Serialize with other platform actions and plan-limit checks on this organization.
       const locked = await tx.$queryRaw<{ id: string }[]>`SELECT id FROM ${table("Organization")} WHERE id = ${id} FOR UPDATE`;
       if (!locked.length) throw new ApiError(404, "Organization not found");
@@ -138,6 +157,18 @@ export async function PATCH(req: Request, { params }: Params) {
           };
           break;
         }
+        case "update-profile": {
+          const data = profileChanges(org, input);
+          const fields = Object.keys(data);
+          // Nothing differs → no write and no audit noise.
+          if (fields.length === 0) return [];
+          await tx.organization.update({ where: { id }, data });
+          platformAction = "ORG_PROFILE_UPDATED";
+          // Same tenant action as the company's own settings page; field names only, never values.
+          tenantAction = "ORG_SETTINGS_UPDATED";
+          detail = { note: PROFILE_UPDATED_NOTE, changed: fields };
+          break;
+        }
         case "update-subscription": {
           const next = {
             subscriptionStatus: input.subscriptionStatus,
@@ -162,10 +193,75 @@ export async function PATCH(req: Request, { params }: Params) {
       await tx.auditLog.create({
         data: supportAuditData({ organizationId: id, action: tenantAction, entityType: "Organization", entityId: id, detail }),
       });
+      return input.action === "update-profile" ? (detail.changed as string[]) : undefined;
     }, TX_OPTIONS);
 
-    return ok({ success: true });
+    return ok(changed ? { success: true, changed } : { success: true });
   } catch (e) {
     return fail(e);
+  }
+}
+
+// DELETE /api/platform/organizations/[id] { confirmName } → OrgDeleteResult
+// PERMANENT. Only a SUSPENDED organization, confirmed by its exact name. Every delete is
+// scoped to this organization id (see orgDeletionWhere); the platform audit row survives.
+export async function DELETE(req: Request, { params }: Params) {
+  try {
+    const admin = await requirePlatformAdmin();
+    const { id } = await params;
+    const { confirmName } = parseBody(deleteOrgSchema, await readJson<unknown>(req));
+    const ip = clientIp(req);
+
+    // Pre-checks outside the transaction for fast, clear errors; repeated under the lock below.
+    const existing = await db.organization.findUnique({ where: { id }, select: { id: true, name: true, status: true } });
+    if (!existing) throw new ApiError(404, "Organization not found");
+    assertCanDelete(existing, confirmName);
+
+    const { counts, fileKeys } = await db.$transaction(async (tx) => {
+      // Serialize with every other platform action on this organization, and block new
+      // rows that reference it, until the deletion commits.
+      const locked = await tx.$queryRaw<{ id: string }[]>`SELECT id FROM ${table("Organization")} WHERE id = ${id} FOR UPDATE`;
+      if (!locked.length) throw new ApiError(404, "Organization not found");
+      const org = await tx.organization.findUniqueOrThrow({ where: { id } });
+      assertCanDelete(org, confirmName);
+
+      // File keys must be read before their rows go; files are removed only after commit.
+      const pods = await tx.proofOfDelivery.findMany({ where: orgDeletionWhere(id).proofOfDelivery, select: { fileKey: true } });
+      const counts = await deleteOrgData(tx, id);
+
+      // PlatformAuditLog has no FK to Organization, so this record outlives the organization.
+      await tx.platformAuditLog.create({
+        data: platformAuditData({
+          actor: admin,
+          action: "ORG_DELETED",
+          targetType: "Organization",
+          targetId: id,
+          organizationId: id,
+          detail: { name: org.name, id: org.id, plan: org.plan, status: org.status, subscriptionStatus: org.subscriptionStatus, counts },
+          ip,
+        }),
+      });
+      return { counts, fileKeys: pods.map((p) => p.fileKey) };
+    }, ORG_DELETE_TX_OPTIONS);
+
+    // Best effort, after commit: a leftover file is harmless, a rolled-back row pointing at a deleted file is not.
+    await removePodFiles(fileKeys);
+
+    const body: OrgDeleteResult = { deleted: true, counts };
+    return ok(body);
+  } catch (e) {
+    return fail(e);
+  }
+}
+
+const POD_DELETE_BATCH = 20;
+
+async function removePodFiles(fileKeys: string[]): Promise<void> {
+  for (let i = 0; i < fileKeys.length; i += POD_DELETE_BATCH) {
+    await Promise.all(
+      fileKeys.slice(i, i + POD_DELETE_BATCH).map((key) =>
+        deletePodFile(key).catch((err: unknown) => console.error("[platform] could not remove proof-of-delivery file after organization deletion:", key, err))
+      )
+    );
   }
 }

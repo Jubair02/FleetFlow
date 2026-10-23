@@ -31,7 +31,7 @@ import type { NotificationItem } from "@/lib/types";
 import { Button } from "@/components/ui/button";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
-import { Sheet, SheetContent, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
+import { Sheet, SheetContent, SheetDescription, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import {
   DropdownMenu,
@@ -42,6 +42,15 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { ChangePasswordDialog } from "@/components/fleetflow/change-password-dialog";
+import {
+  DockedSidebar,
+  PremiumSidebar,
+  SIDEBAR_SHEET_CLASS,
+  SidebarFooterNote,
+  type SidebarMode,
+  type SidebarNavGroup,
+} from "@/components/shared/sidebar/premium-sidebar";
+import { useSidebarCollapsed } from "@/components/shared/sidebar/use-sidebar-collapsed";
 
 const ADMIN_NAV: { section: string; items: { view: AppView; label: string; icon: typeof LayoutDashboard }[] }[] = [
   {
@@ -101,62 +110,6 @@ const VIEW_TITLES: Record<AppView, string> = {
   "driver-history": "My History",
 };
 
-function Logo() {
-  return (
-    <div className="flex items-center gap-2.5 px-1">
-      <div className="flex size-9 shrink-0 items-center justify-center rounded-xl bg-primary text-primary-foreground shadow-sm">
-        <Truck className="size-5" />
-      </div>
-      <div className="leading-tight">
-        <div className="font-semibold tracking-tight text-sidebar-foreground">FleetFlow</div>
-        <div className="text-[11px] text-muted-foreground">Fleet &amp; Delivery</div>
-      </div>
-    </div>
-  );
-}
-
-function NavLinks({ onNavigate }: { onNavigate?: () => void }) {
-  const view = useAppStore((s) => s.view);
-  const setView = useAppStore((s) => s.setView);
-  const session = useAppStore((s) => s.session);
-  const nav = session?.role === "ADMIN" ? ADMIN_NAV : DRIVER_NAV;
-
-  return (
-    <nav className="flex flex-col gap-5" aria-label="Main navigation">
-      {nav.map((group) => (
-        <div key={group.section}>
-          <div className="mb-1.5 px-3 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground/70">{group.section}</div>
-          <div className="flex flex-col gap-0.5">
-            {group.items.map((item) => {
-              const active = view === item.view;
-              const Icon = item.icon;
-              return (
-                <button
-                  key={item.view}
-                  onClick={() => {
-                    setView(item.view);
-                    onNavigate?.();
-                  }}
-                  className={cn(
-                    "flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-sm font-medium transition-colors text-left",
-                    active
-                      ? "bg-sidebar-accent text-sidebar-accent-foreground shadow-sm"
-                      : "text-sidebar-foreground/70 hover:bg-sidebar-accent/60 hover:text-sidebar-foreground"
-                  )}
-                  aria-current={active ? "page" : undefined}
-                >
-                  <Icon className={cn("size-4 shrink-0", active ? "text-primary" : "text-muted-foreground")} />
-                  {item.label}
-                </button>
-              );
-            })}
-          </div>
-        </div>
-      ))}
-    </nav>
-  );
-}
-
 /** Ends the server session, then clears session + navigation state client-side. */
 function useLogout(onDone?: () => void) {
   const [loggingOut, setLoggingOut] = useState(false);
@@ -173,46 +126,19 @@ function useLogout(onDone?: () => void) {
   return { logout, loggingOut };
 }
 
-function UserCard({ onNavigate }: { onNavigate?: () => void }) {
-  const session = useAppStore((s) => s.session);
-  const { logout, loggingOut } = useLogout(onNavigate);
-  if (!session) return null;
+type NotificationFeed = ReturnType<typeof useNotificationFeed>;
 
-  return (
-    <div className="flex items-center justify-between gap-2 rounded-xl border bg-card p-3">
-      <div className="flex min-w-0 items-center gap-2.5">
-        <Avatar className="size-8 border">
-          <AvatarFallback className="bg-primary/10 text-primary text-xs font-semibold">{initials(session.name)}</AvatarFallback>
-        </Avatar>
-        <div className="min-w-0 leading-tight">
-          <div className="truncate text-sm font-medium">{session.name}</div>
-          <div className="truncate text-[11px] text-muted-foreground">
-            {session.role === "ADMIN" ? "Dispatcher · Admin" : "Driver"} · {session.organizationName}
-          </div>
-        </div>
-      </div>
-      <Button variant="ghost" size="icon" onClick={logout} disabled={loggingOut} title="Sign out" aria-label="Sign out">
-        <LogOut className="size-4" />
-      </Button>
-    </div>
-  );
-}
-
-function NotificationBell({ triggerClassName }: { triggerClassName?: string } = {}) {
-  const setView = useAppStore((s) => s.setView);
+/** One notifications feed per shell — shared by the header bell and the sidebar badge. */
+function useNotificationFeed() {
   const bump = useAppStore((s) => s.bump);
-  const session = useAppStore((s) => s.session);
-  const [open, setOpen] = useState(false);
-  const { data, loading, error, reload } = useApiData<{ items: NotificationItem[]; unread: number }>("/api/notifications");
+  const feed = useApiData<{ items: NotificationItem[]; unread: number }>("/api/notifications");
+  const { data, reload } = feed;
 
   // poll for new notifications every 45s
   useEffect(() => {
     const t = setInterval(reload, 45000);
     return () => clearInterval(t);
   }, [reload]);
-
-  const unread = data?.unread ?? 0;
-  const items = data?.items ?? [];
 
   // New notifications (e.g. a fresh assignment) → refresh every mounted view.
   const prevUnread = useRef<number | null>(null);
@@ -221,6 +147,19 @@ function NotificationBell({ triggerClassName }: { triggerClassName?: string } = 
     if (prevUnread.current !== null && data.unread > prevUnread.current) bump();
     prevUnread.current = data.unread;
   }, [data, bump]);
+
+  return feed;
+}
+
+function NotificationBell({ feed, triggerClassName }: { feed: NotificationFeed; triggerClassName?: string }) {
+  const setView = useAppStore((s) => s.setView);
+  const bump = useAppStore((s) => s.bump);
+  const session = useAppStore((s) => s.session);
+  const [open, setOpen] = useState(false);
+  const { data, loading, error } = feed;
+
+  const unread = data?.unread ?? 0;
+  const items = data?.items ?? [];
 
   const markAllRead = async () => {
     try {
@@ -347,24 +286,95 @@ function DriverThemeMenuItem() {
   );
 }
 
-function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
+function CompanySidebar({
+  mode,
+  unread,
+  collapsed,
+  onToggleCollapsed,
+  onRequestOverlay,
+  onNavigate,
+  onChangePassword,
+  onSignOut,
+  signingOut,
+}: {
+  mode: SidebarMode;
+  unread: number;
+  collapsed?: boolean;
+  onToggleCollapsed?: () => void;
+  onRequestOverlay?: () => void;
+  onNavigate?: () => void;
+  onChangePassword: () => void;
+  onSignOut: () => void;
+  signingOut: boolean;
+}) {
+  const view = useAppStore((s) => s.view);
+  const setView = useAppStore((s) => s.setView);
   const session = useAppStore((s) => s.session);
+  if (!session) return null;
+  const isAdmin = session.role === "ADMIN";
+  const nav = isAdmin ? ADMIN_NAV : DRIVER_NAV;
+  const go = (v: AppView) => {
+    setView(v);
+    onNavigate?.();
+  };
+
+  const groups: SidebarNavGroup[] = nav.map((group) => ({
+    label: group.section,
+    items: group.items.map((item) => ({
+      key: item.view,
+      label: item.label,
+      icon: item.icon,
+      active: view === item.view,
+      badge: item.view === "notifications" ? unread : undefined,
+      badgeLabel: "unread",
+      onSelect: () => go(item.view),
+    })),
+  }));
+
   return (
-    <div className="flex h-full flex-col gap-6 p-4">
-      <Logo />
-      <div className="flex-1 overflow-y-auto">
-        <NavLinks onNavigate={onNavigate} />
-      </div>
-      <div className="flex flex-col gap-3">
-        {session && (
-          <div className="flex items-center gap-2 rounded-lg border px-3 py-2 text-xs text-muted-foreground">
-            <Building2 className="size-3.5 shrink-0" aria-hidden />
-            <span className="truncate font-medium text-foreground">{session.organizationName}</span>
-          </div>
-        )}
-        <UserCard onNavigate={onNavigate} />
-      </div>
-    </div>
+    <PremiumSidebar
+      mode={mode}
+      accent="emerald"
+      brand={{ title: "FleetFlow", subtitle: "Fleet & Delivery" }}
+      navLabel="Main navigation"
+      groups={groups}
+      collapsed={collapsed}
+      onToggleCollapsed={onToggleCollapsed}
+      onRequestOverlay={onRequestOverlay}
+      footer={
+        <SidebarFooterNote icon={Building2} label={`Organization: ${session.organizationName}`}>
+          <div className="text-[11px] text-(--ff-sidebar-muted)">Organization</div>
+          <div className="truncate text-sm font-medium text-white">{session.organizationName}</div>
+        </SidebarFooterNote>
+      }
+      user={{
+        name: session.name,
+        detail: isAdmin ? "Dispatcher · Admin" : "Driver",
+        initials: initials(session.name),
+        menuLabel: (
+          <>
+            <div className="truncate text-sm font-semibold">{session.name}</div>
+            <div className="truncate text-xs font-normal text-muted-foreground">{session.email}</div>
+          </>
+        ),
+        menu: (
+          <>
+            {isAdmin && (
+              <DropdownMenuItem className="cursor-pointer" onSelect={() => go("settings")}>
+                <Settings className="mr-2 size-4" /> Company settings
+              </DropdownMenuItem>
+            )}
+            <DropdownMenuItem className="cursor-pointer" onSelect={onChangePassword}>
+              <KeyRound className="mr-2 size-4" /> Change password
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem className="cursor-pointer" disabled={signingOut} onSelect={onSignOut}>
+              <LogOut className="mr-2 size-4" /> Sign out
+            </DropdownMenuItem>
+          </>
+        ),
+      }}
+    />
   );
 }
 
@@ -429,13 +439,25 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     setPasswordSeq((n) => n + 1);
     setPasswordOpen(true);
   };
+  const notifications = useNotificationFeed();
+  const unread = notifications.data?.unread ?? 0;
+  const [collapsed, setCollapsed] = useSidebarCollapsed("fleetflow:sidebar-collapsed:app");
 
   return (
-    <div className="flex min-h-screen w-full bg-background">
-      {/* Desktop sidebar */}
-      <aside className="sticky top-0 hidden h-screen w-64 shrink-0 flex-col border-r bg-sidebar text-sidebar-foreground md:flex">
-        <SidebarContent />
-      </aside>
+    <div className="flex min-h-dvh w-full bg-background">
+      {/* Docked sidebar: icon rail on md, full (collapsible) on ≥lg */}
+      <DockedSidebar collapsed={collapsed}>
+        <CompanySidebar
+          mode="docked"
+          unread={unread}
+          collapsed={collapsed}
+          onToggleCollapsed={() => setCollapsed(!collapsed)}
+          onRequestOverlay={() => setMobileNavOpen(true)}
+          onChangePassword={openPasswordDialog}
+          onSignOut={() => void logout()}
+          signingOut={loggingOut}
+        />
+      </DockedSidebar>
 
       {/* Main column */}
       <div className="flex min-w-0 flex-1 flex-col">
@@ -448,9 +470,23 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                 <Menu className="size-5" />
               </Button>
             </SheetTrigger>
-            <SheetContent side="left" className="w-72 bg-sidebar p-0">
+            <SheetContent side="left" className={SIDEBAR_SHEET_CLASS}>
               <SheetTitle className="sr-only">Navigation</SheetTitle>
-              <SidebarContent onNavigate={() => setMobileNavOpen(false)} />
+              <SheetDescription className="sr-only">Switch between FleetFlow sections</SheetDescription>
+              <CompanySidebar
+                mode="sheet"
+                unread={unread}
+                onNavigate={() => setMobileNavOpen(false)}
+                onChangePassword={() => {
+                  setMobileNavOpen(false);
+                  openPasswordDialog();
+                }}
+                onSignOut={() => {
+                  setMobileNavOpen(false);
+                  void logout();
+                }}
+                signingOut={loggingOut}
+              />
             </SheetContent>
           </Sheet>
 
@@ -463,7 +499,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             <h1 className="truncate text-base font-semibold tracking-tight md:text-lg">{VIEW_TITLES[view]}</h1>
           )}
           <div className="ml-auto flex items-center gap-1">
-            <NotificationBell triggerClassName={isDriver ? "max-md:size-11" : undefined} />
+            <NotificationBell feed={notifications} triggerClassName={isDriver ? "max-md:size-11" : undefined} />
             {/* Drivers on phones get the theme switch inside the account menu instead. */}
             <ThemeToggle className={isDriver ? "max-md:hidden" : undefined} />
             <DropdownMenu>

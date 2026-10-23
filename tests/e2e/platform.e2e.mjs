@@ -191,6 +191,36 @@ async function main() {
   }
   check("audit trail contains no secrets", !HASH_LIKE.test(r.text) && !/temporaryPassword|passwordHash/i.test(r.text));
 
+  console.log("\n# Permanent delete (guarded)");
+  const del = (body) => ops.req("DELETE", `/api/platform/organizations/${orgId}`, body);
+  const orgName = `Meghna Foods ${stamp}`;
+  const swiftBefore = (await companyAdmin.get("/api/deliveries")).data.total;
+  r = await companyAdmin.req("DELETE", `/api/platform/organizations/${orgId}`, { confirmName: orgName });
+  check("company admin cannot delete organizations", r.status === 401, r.status);
+  r = await del({ confirmName: orgName });
+  check("active organization can't be deleted → 409", r.status === 409, r);
+  r = await ops.patch(`/api/platform/organizations/${orgId}`, { action: "suspend", reason: "Closing account (e2e)" });
+  r = await ops.get(`/api/platform/organizations/${orgId}/delete-preview`);
+  check("delete preview shows counts", r.status === 200 && r.data.counts && Object.values(r.data.counts).some((n) => n > 0), r.data);
+  r = await del({ confirmName: orgName.toUpperCase() });
+  check("name must match exactly (case) → 400", r.status === 400, r.status);
+  r = await del({ confirmName: `${orgName} ` });
+  check("name must match exactly (trailing space) → 400", r.status === 400, r.status);
+  r = await del({ confirmName: orgName });
+  check("suspended + exact name → permanently deleted", r.status === 200 && r.data.deleted === true, r);
+  r = await ops.get(`/api/platform/organizations/${orgId}`);
+  check("organization is gone → 404", r.status === 404, r.status);
+  r = await new Client().post("/api/auth/login", { email: `farhan-${stamp}@meghna.test`, password: farhanTemp });
+  check("its users are gone (login fails)", r.status === 401, r.status);
+  r = await anon.get(`/api/track/${trackingToken}`);
+  check("its tracking links are gone → 404", r.status === 404, r.status);
+  r = await companyAdmin.get("/api/deliveries");
+  check("other organizations untouched (SwiftDrop deliveries unchanged)", r.status === 200 && r.data.total === swiftBefore, [swiftBefore, r.data.total]);
+  r = await ops.get("/api/platform/audit?action=ORG_DELETED");
+  check("ORG_DELETED audit record survives with counts", r.data.items?.some((a) => a.targetId === orgId && /counts|deliveries/i.test(a.detail ?? "")), r.data.items?.slice(0, 1));
+  r = await del({ confirmName: orgName });
+  check("deleting again → 404", r.status === 404, r.status);
+
   console.log("\n# Sign out");
   await ops.post("/api/platform/auth/logout");
   r = await ops.get("/api/platform/overview");

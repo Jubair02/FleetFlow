@@ -1,8 +1,8 @@
 import { db } from "@/lib/db";
 import { fail, localDayKey, ok, parseTzOffset, requireAdmin } from "@/lib/api-helpers";
 import { onTimeRateFromCounts, summarizeStatuses } from "@/lib/report-metrics";
+import { ACTIVE_DELIVERY_STATUSES, DAY_MS, summarizeDeadlines } from "@/lib/dashboard-metrics";
 
-const DAY_MS = 24 * 60 * 60 * 1000;
 const CHART_DAYS = 14;
 
 // GET /api/dashboard?tz= — operations metrics for the admin dashboard
@@ -39,6 +39,7 @@ export async function GET(req: Request) {
       failedList,
       urgentList,
       pendingUrgentCount,
+      activeWithDeadline,
     ] = await Promise.all([
       db.delivery.groupBy({ by: ["status"], where: orgDeliveries, _count: { _all: true } }),
       db.delivery.groupBy({ by: ["priority"], where: orgDeliveries, _count: { _all: true } }),
@@ -95,6 +96,15 @@ export async function GET(req: Request) {
         take: 5,
       }),
       db.delivery.count({ where: urgentPendingWhere }),
+      // Overdue / due-today candidates: active deliveries whose deadline is before tomorrow (viewer tz).
+      db.delivery.findMany({
+        where: {
+          ...orgDeliveries,
+          status: { in: [...ACTIVE_DELIVERY_STATUSES] },
+          expectedAt: { not: null, lt: new Date(todayStart + DAY_MS) },
+        },
+        select: { id: true, trackingCode: true, recipientName: true, status: true, expectedAt: true },
+      }),
     ]);
 
     const byStatus = (s: string) => statusCounts.find((c) => c.status === s)?._count._all ?? 0;
@@ -126,6 +136,8 @@ export async function GET(req: Request) {
     }));
 
     const attentionVehicles = vehicles.filter((v) => v.status !== "ACTIVE");
+    const deadlines = summarizeDeadlines(activeWithDeadline, Date.now(), tz, todayStart);
+    const todayBucket = dailyMap.get(todayKey) ?? { total: 0, completed: 0, failed: 0 };
 
     return ok({
       stats: {
@@ -145,6 +157,13 @@ export async function GET(req: Request) {
         deliveredWithoutDeadline,
       },
       daily: Array.from(dailyMap.values()),
+      today: { created: todayBucket.total, delivered: todayBucket.completed, failed: todayBucket.failed },
+      now: {
+        waiting: counts.pendingDispatch,
+        onTheRoad: counts.inProgress,
+        overdue: deadlines.overdue.length,
+        dueToday: deadlines.dueToday,
+      },
       statusBreakdown,
       priorityBreakdown,
       recentEvents: recentEvents.map((e) => ({
@@ -167,6 +186,13 @@ export async function GET(req: Request) {
           type: v.type,
           status: v.status,
           notes: v.notes,
+        })),
+        overdueDeliveries: deadlines.overdue.slice(0, 5).map((d) => ({
+          id: d.id,
+          trackingCode: d.trackingCode,
+          recipientName: d.recipientName,
+          status: d.status,
+          expectedAt: d.expectedAt?.toISOString() ?? null,
         })),
       },
       driverWorkload: drivers

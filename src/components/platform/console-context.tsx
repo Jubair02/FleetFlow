@@ -5,6 +5,9 @@ import type { PlatformAdminInfo } from "@/lib/platform-types";
 
 export type PlatformView = "overview" | "organizations" | "users" | "plans" | "analytics" | "audit" | "settings";
 
+/** Tabs of the organization dialog (organizations/dialog/org-dialog.tsx). */
+export type OrgDialogTab = "overview" | "users" | "subscription" | "deliveries" | "activity";
+
 export interface OrgRef {
   id: string;
   name: string;
@@ -14,8 +17,8 @@ export interface ConsoleContextValue {
   admin: PlatformAdminInfo;
   view: PlatformView;
   setView: (view: PlatformView) => void;
-  /** Open the organization detail panel (works from any view). */
-  openOrg: (id: string) => void;
+  /** Open the organization dialog on a tab (default Overview); works from any view. */
+  openOrg: (id: string, tab?: OrgDialogTab) => void;
   /** Jump to Users filtered to one organization. */
   showOrgUsers: (org: OrgRef) => void;
   /** Jump to Audit Logs filtered to one organization. */

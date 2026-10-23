@@ -27,6 +27,15 @@ export function isDateOnly(d: Date): boolean {
   return d.getHours() === 0 && d.getMinutes() === 0 && d.getSeconds() === 0;
 }
 
+/**
+ * When a deadline actually passes. A date-only deadline (stored as local
+ * midnight) lasts the whole day, so it's only overdue from the next midnight.
+ */
+export function deadlineMs(iso: string): number {
+  const d = new Date(iso);
+  return isDateOnly(d) ? d.getTime() + 24 * 60 * 60 * 1000 : d.getTime();
+}
+
 export function friendlyDueDate(iso: string | null | undefined): string {
   if (!iso) return "No deadline";
   const d = new Date(iso);

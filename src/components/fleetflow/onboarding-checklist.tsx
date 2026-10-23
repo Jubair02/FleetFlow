@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { ArrowRight, CheckCircle2, Circle, FileUp, Plus, Rocket, X } from "lucide-react";
+import { ArrowRight, CheckCircle2, ChevronDown, Circle, FileUp, Plus, X } from "lucide-react";
 import { toast } from "sonner";
 import { api, useApiData } from "@/lib/api-client";
 import { onboardingProgress } from "@/lib/onboarding";
@@ -10,8 +10,8 @@ import { goToDeliveriesAction, goToSettings, useAppStore } from "@/store/app-sto
 import type { OnboardingData, OnboardingStep, OnboardingStepKey } from "@/lib/types-org";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Progress } from "@/components/ui/progress";
+import { CARD_SURFACE, ENTER_MOTION } from "@/components/fleetflow/driver/job-utils";
 
 interface StepAction {
   label: string;
@@ -45,7 +45,7 @@ function StepRow({ step, index, current }: { step: OnboardingStep; index: number
   return (
     <li
       className={cn(
-        "flex flex-col gap-3 rounded-lg border p-3 sm:flex-row sm:items-center",
+        "flex flex-col gap-3 rounded-xl border p-3 sm:flex-row sm:items-center",
         current ? "border-primary/40 bg-primary/5" : "bg-card",
         step.done && "opacity-70"
       )}
@@ -100,15 +100,18 @@ function StepRow({ step, index, current }: { step: OnboardingStep; index: number
   );
 }
 
-/** Getting-started checklist shown on the dashboard until it's done or dismissed. */
+/** Getting-started checklist shown on the dashboard until it's done or dismissed: a slim progress strip that expands to every step. */
 export function OnboardingChecklist() {
   const { data, reload } = useApiData<OnboardingData>("/api/onboarding");
   const [hiding, setHiding] = useState(false);
+  const [expanded, setExpanded] = useState(false);
 
   if (!data || data.dismissed || data.allDone) return null;
 
   const progress = onboardingProgress(data);
-  const currentKey = data.steps.find((s) => !s.done && !s.optional)?.key ?? data.steps.find((s) => !s.done)?.key;
+  const current = data.steps.find((s) => !s.done && !s.optional) ?? data.steps.find((s) => !s.done);
+  const currentKey = current?.key;
+  const next = current ? actionsFor(current.key)[0] : null;
 
   const dismiss = async () => {
     setHiding(true);
@@ -124,40 +127,71 @@ export function OnboardingChecklist() {
   };
 
   return (
-    <Card aria-labelledby="onboarding-title" className="gap-4 border-primary/30">
-      <CardHeader className="flex flex-row items-start justify-between gap-3">
-        <div className="flex min-w-0 items-start gap-3">
-          <div className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
-            <Rocket className="size-5" aria-hidden />
-          </div>
-          <div className="min-w-0">
-            <CardTitle id="onboarding-title" className="text-base">
-              Get your first delivery out
-            </CardTitle>
-            <CardDescription className="text-xs">
-              Follow these steps in order — by the end a driver is carrying a tracked delivery with proof of delivery.
-            </CardDescription>
-          </div>
-        </div>
-        <Button variant="ghost" size="sm" onClick={dismiss} disabled={hiding} className="shrink-0 text-muted-foreground">
-          <X aria-hidden /> <span className="hidden sm:inline">Hide</span>
-          <span className="sr-only sm:hidden">Hide checklist</span>
-        </Button>
-      </CardHeader>
-      <CardContent className="flex flex-col gap-4">
-        <div className="flex items-center gap-3">
-          <Progress value={progress.percent} aria-label={`${progress.done} of ${progress.total} steps done`} />
-          <span className="whitespace-nowrap text-xs tabular-nums text-muted-foreground">
-            {progress.done} of {progress.total} done
+    <section
+      aria-labelledby="onboarding-title"
+      className={cn(CARD_SURFACE, "p-3 sm:p-4", ENTER_MOTION)}
+    >
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+        <div className="flex min-w-0 flex-1 items-center gap-3">
+          <span
+            className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-primary/10 text-sm font-semibold tabular-nums text-primary ring-1 ring-inset ring-primary/15"
+            aria-hidden
+          >
+            {progress.done}/{progress.total}
           </span>
+          <div className="min-w-0 flex-1">
+            <h2 id="onboarding-title" className="text-sm font-semibold">
+              Setup {progress.done} of {progress.total}
+              {current ? <span className="font-normal text-muted-foreground"> · Next: {current.label}</span> : null}
+            </h2>
+            <Progress
+              value={progress.percent}
+              aria-label={`${progress.done} of ${progress.total} setup steps done`}
+              className="mt-1.5 h-1.5 max-w-xs"
+            />
+          </div>
         </div>
-        <ol className="flex flex-col gap-2">
+        <div className="flex items-center gap-1.5">
+          {next ? (
+            <Button
+              size="sm"
+              onClick={next.run}
+              className="min-h-11 flex-1 rounded-xl font-semibold transition-transform duration-150 motion-safe:active:scale-[0.98] sm:min-h-9 sm:flex-none"
+            >
+              Continue <ArrowRight aria-hidden />
+            </Button>
+          ) : null}
+          <Button
+            size="sm"
+            variant="ghost"
+            onClick={() => setExpanded((v) => !v)}
+            aria-expanded={expanded}
+            aria-controls="onboarding-steps"
+            className="min-h-11 rounded-xl text-muted-foreground sm:min-h-9"
+          >
+            <ChevronDown className={cn("transition-transform duration-200", expanded && "rotate-180")} aria-hidden />
+            {expanded ? "Less" : "All steps"}
+          </Button>
+          <Button
+            size="sm"
+            variant="ghost"
+            onClick={dismiss}
+            disabled={hiding}
+            className="min-h-11 min-w-11 rounded-xl text-muted-foreground sm:min-h-9 sm:min-w-9"
+            aria-label="Hide setup checklist"
+          >
+            <X aria-hidden />
+          </Button>
+        </div>
+      </div>
+      {expanded ? (
+        <ol id="onboarding-steps" className={cn("mt-3 flex flex-col gap-2", ENTER_MOTION)}>
           {data.steps.map((step, i) => (
             <StepRow key={step.key} step={step} index={i} current={step.key === currentKey} />
           ))}
         </ol>
-      </CardContent>
-    </Card>
+      ) : null}
+    </section>
   );
 }
 

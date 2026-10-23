@@ -21,7 +21,8 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { useConsole, type OrgRef } from "./console-context";
-import { bumpPlatformData, platformApi, useDebounced, usePlatformData, withQuery } from "./platform-api";
+import { useDebounced, usePlatformData, withQuery } from "./platform-api";
+import { runUserAction, USER_ACTION_COPY, userActionSuccess } from "./user-actions";
 import {
   ConfirmDialog,
   EmptyState,
@@ -37,33 +38,6 @@ import {
 } from "./shared";
 
 type PendingAction = { user: PlatformUserRow; action: UserAction["action"] } | null;
-
-const ACTION_COPY: Record<UserAction["action"], { title: (u: PlatformUserRow) => string; description: string; confirm: string; destructive?: boolean }> = {
-  deactivate: {
-    title: (u) => `Deactivate ${u.name}?`,
-    description:
-      "They are signed out everywhere and can't sign in until reactivated. Their deliveries, history and audit trail are kept. Their organization's admins can see the change.",
-    confirm: "Deactivate",
-    destructive: true,
-  },
-  activate: {
-    title: (u) => `Reactivate ${u.name}?`,
-    description: "They can sign in again with their existing password. Plan limits for the organization may block reactivation if it is at its limit.",
-    confirm: "Reactivate",
-  },
-  "reset-password": {
-    title: (u) => `Reset password for ${u.name}?`,
-    description:
-      "Their current password stops working and they are signed out everywhere. A temporary password is shown to you once — share it privately; they must choose a new one at next sign-in.",
-    confirm: "Reset password",
-    destructive: true,
-  },
-  "revoke-sessions": {
-    title: (u) => `Sign ${u.name} out everywhere?`,
-    description: "Ends every active session on all devices. Their password is unchanged — they can sign in again straight away.",
-    confirm: "Sign out everywhere",
-  },
-};
 
 export function UsersView() {
   const { usersOrgFilter, setUsersOrgFilter, openOrg } = useConsole();
@@ -94,22 +68,11 @@ export function UsersView() {
   const runAction = async () => {
     if (!pending) return;
     const { user, action } = pending;
-    const res = await platformApi.patch<{ success: boolean; temporaryPassword?: string }>(`/api/platform/users/${encodeURIComponent(user.id)}`, {
-      action,
-    } satisfies UserAction);
-    bumpPlatformData();
+    const res = await runUserAction(user, action);
     if (action === "reset-password" && res.temporaryPassword) {
       setTempPassword({ title: `Temporary password for ${user.name}`, email: user.email, password: res.temporaryPassword });
     } else {
-      toast.success(
-        action === "deactivate"
-          ? `${user.name} deactivated`
-          : action === "activate"
-            ? `${user.name} reactivated`
-            : action === "revoke-sessions"
-              ? `${user.name} signed out everywhere`
-              : `Password reset for ${user.name}`
-      );
+      toast.success(userActionSuccess(user, action));
     }
   };
 
@@ -299,17 +262,17 @@ export function UsersView() {
           key={pendingSeq}
           open
           onOpenChange={(o) => !o && setPending(null)}
-          title={ACTION_COPY[pending.action].title(pending.user)}
+          title={USER_ACTION_COPY[pending.action].title(pending.user)}
           description={
             <>
-              <p>{ACTION_COPY[pending.action].description}</p>
+              <p>{USER_ACTION_COPY[pending.action].description}</p>
               <p className="mt-2 text-xs">
                 {pending.user.email} · {pending.user.organization.name}
               </p>
             </>
           }
-          confirmLabel={ACTION_COPY[pending.action].confirm}
-          destructive={ACTION_COPY[pending.action].destructive}
+          confirmLabel={USER_ACTION_COPY[pending.action].confirm}
+          destructive={USER_ACTION_COPY[pending.action].destructive}
           onConfirm={runAction}
         />
       )}

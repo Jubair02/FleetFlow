@@ -84,7 +84,9 @@ async function main() {
   const seeded = r.data.plans ?? [];
   check("4 seeded plans, trial is the default", seeded.length >= 4 && seeded.find((p) => p.code === "trial")?.isDefault === true, seeded.map((p) => [p.code, p.isDefault]));
   r = await anon.get("/api/plans");
-  check("public pricing lists only active public plans (no trial)", r.status === 200 && r.data.plans.every((p) => p.active && p.isPublic) && !r.data.plans.some((p) => p.code === "trial"), r.data.plans?.map((p) => p.code));
+  // Compare against the configured flags (admins may make any plan public, e.g. Trial).
+  const expectedPublic = seeded.filter((p) => p.active && p.isPublic).map((p) => p.code).sort().join();
+  check("public pricing lists exactly the active public plans", r.status === 200 && r.data.plans.map((p) => p.code).sort().join() === expectedPublic, [r.data.plans?.map((p) => p.code), expectedPublic]);
 
   console.log("\n# Create & validate");
   r = await ops.post("/api/platform/plans", planBody({ code: "Bad Code!" }));

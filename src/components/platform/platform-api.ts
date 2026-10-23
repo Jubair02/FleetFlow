@@ -67,6 +67,7 @@ export const platformApi = {
   get: <T>(path: string) => platformFetch<T>(path),
   post: <T>(path: string, body?: unknown) => platformFetch<T>(path, { method: "POST", body: JSON.stringify(body ?? {}) }),
   patch: <T>(path: string, body?: unknown) => platformFetch<T>(path, { method: "PATCH", body: JSON.stringify(body ?? {}) }),
+  delete: <T>(path: string, body?: unknown) => platformFetch<T>(path, { method: "DELETE", body: JSON.stringify(body ?? {}) }),
 };
 
 // ── Global refresh signal (bump after any mutation) ──────────

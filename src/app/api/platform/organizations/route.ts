@@ -8,59 +8,106 @@ import { DEFAULT_TIMEZONE } from "@/lib/timezone";
 import { listPrice } from "@/lib/plans";
 import { platformAuditData, requirePlatformAdmin } from "@/lib/platform-auth";
 import {
-  ORG_PAGE_SIZE, createOrgSchemaFor, orgListQuery, toBillingCycle, paged, parseBody, parseQuery, startOfUtcMonth, supportAuditData,
+  ORG_EXPORT_CAP, ORG_PAGE_SIZE, createOrgSchemaFor, daysBefore, orgListQuery, parseRegisteredRange, toBillingCycle, paged, parseBody,
+  parseQuery, startOfUtcMonth, supportAuditData,
 } from "@/lib/platform-service";
-import type { CreateOrgResult, OrgStatus, PlatformOrgRow, SubscriptionStatus } from "@/lib/platform-types";
+import type { CreateOrgResult, OrgStatus, PlatformOrgList, PlatformOrgRow, PlatformOrgSummary, SubscriptionStatus } from "@/lib/platform-types";
 
-// GET /api/platform/organizations?search=&status=&plan=&page=
+// GET /api/platform/organizations?search=&status=&plan=&page=&pageSize=&subscription=&from=&to=&export=1
+// → PlatformOrgList. ?export=1 returns every match (max ORG_EXPORT_CAP) as one page, with summary: null.
 export async function GET(req: Request) {
   try {
     await requirePlatformAdmin();
-    const q = parseQuery(orgListQuery, new URL(req.url).searchParams, ["search", "status", "plan", "page"]);
+    const q = parseQuery(orgListQuery, new URL(req.url).searchParams, [
+      "search", "status", "plan", "page", "pageSize", "subscription", "from", "to", "export",
+    ]);
     if (q.plan && !(await db.plan.findUnique({ where: { code: q.plan }, select: { code: true } }))) {
       throw new ApiError(400, "Unknown plan");
     }
+    const registered = parseRegisteredRange(q.from, q.to);
+    const exporting = !!q.export;
+    const pageSize = exporting ? ORG_EXPORT_CAP : q.pageSize ?? ORG_PAGE_SIZE;
+    const pageNo = exporting ? 1 : q.page;
 
     const where: Prisma.OrganizationWhereInput = {
       ...(q.status ? { status: q.status } : {}),
+      ...(q.subscription ? { subscriptionStatus: q.subscription } : {}),
       ...(q.plan ? { plan: q.plan } : {}),
+      ...(registered ? { createdAt: registered } : {}),
       ...(q.search
         ? {
             OR: [
               { name: { contains: q.search, mode: "insensitive" } },
               { id: { contains: q.search, mode: "insensitive" } },
               { contactEmail: { contains: q.search, mode: "insensitive" } },
+              { users: { some: { role: "ADMIN", email: { contains: q.search, mode: "insensitive" } } } },
             ],
           }
         : {}),
     };
 
-    const [total, orgs] = await Promise.all([
+    const now = new Date();
+    const weekAgo = daysBefore(now, 7);
+    const summaryQuery: Promise<PlatformOrgSummary | null> = exporting
+      ? Promise.resolve(null)
+      : Promise.all([
+          db.organization.count(),
+          db.organization.count({ where: { createdAt: { gte: weekAgo } } }),
+          db.organization.count({ where: { status: "ACTIVE" } }),
+          db.organization.count({ where: { status: "ACTIVE", createdAt: { gte: weekAgo } } }),
+          db.user.count(),
+          db.user.count({ where: { createdAt: { gte: weekAgo } } }),
+          db.organization.count({ where: { subscriptionStatus: "ACTIVE" } }),
+        ]).then(([totalOrganizations, newOrganizationsThisWeek, activeOrganizations, newActiveThisWeek, totalUsers, newUsersThisWeek, activeSubscriptions]) => ({
+          totalOrganizations, newOrganizationsThisWeek, activeOrganizations, newActiveThisWeek, totalUsers, newUsersThisWeek, activeSubscriptions,
+        }));
+
+    const [total, orgs, summary] = await Promise.all([
       db.organization.count({ where }),
       db.organization.findMany({
         where,
         orderBy: [{ createdAt: "desc" }, { id: "desc" }],
-        skip: (q.page - 1) * ORG_PAGE_SIZE,
-        take: ORG_PAGE_SIZE,
+        skip: (pageNo - 1) * pageSize,
+        take: pageSize,
         select: {
           id: true, name: true, status: true, plan: true, subscriptionStatus: true, paidUntil: true, createdAt: true,
-          billingCycle: true, subscriptionPriceBdt: true, planRecord: { select: { name: true } },
+          billingCycle: true, subscriptionPriceBdt: true, contactEmail: true, planRecord: { select: { name: true, active: true } },
         },
       }),
+      summaryQuery,
     ]);
 
     const ids = orgs.map((o) => o.id);
-    const monthStart = startOfUtcMonth(new Date());
+    const monthStart = startOfUtcMonth(now);
+    const day30 = daysBefore(now, 30);
+    const day60 = daysBefore(now, 60);
     const inPage = { organizationId: { in: ids } };
-    const [users, vehicles, deliveries, deliveriesMonth, audits] = ids.length
+    // One groupBy per metric over this page's ids — never a query per organization.
+    const [users, vehicles, deliveries, deliveriesMonth, deliveries30, deliveriesPrev30, audits] = ids.length
       ? await Promise.all([
-          db.user.groupBy({ by: ["organizationId", "role"], where: { ...inPage, active: true }, _count: { _all: true } }),
+          db.user.groupBy({ by: ["organizationId", "role", "active"], where: inPage, _count: { _all: true } }),
           db.vehicle.groupBy({ by: ["organizationId"], where: { ...inPage, status: { not: "INACTIVE" } }, _count: { _all: true } }),
           db.delivery.groupBy({ by: ["organizationId"], where: inPage, _count: { _all: true }, _max: { createdAt: true } }),
           db.delivery.groupBy({ by: ["organizationId"], where: { ...inPage, createdAt: { gte: monthStart } }, _count: { _all: true } }),
+          db.delivery.groupBy({ by: ["organizationId"], where: { ...inPage, createdAt: { gte: day30 } }, _count: { _all: true } }),
+          db.delivery.groupBy({ by: ["organizationId"], where: { ...inPage, createdAt: { gte: day60, lt: day30 } }, _count: { _all: true } }),
           db.auditLog.groupBy({ by: ["organizationId"], where: inPage, _max: { createdAt: true } }),
         ])
-      : [[], [], [], [], []];
+      : [[], [], [], [], [], [], []];
+
+    const countBy = (rows: { organizationId: string | null; _count: { _all: number } }[]) => {
+      const m = new Map<string, number>();
+      for (const r of rows) if (r.organizationId) m.set(r.organizationId, (m.get(r.organizationId) ?? 0) + r._count._all);
+      return m;
+    };
+    const vehiclesBy = countBy(vehicles);
+    const monthBy = countBy(deliveriesMonth);
+    const d30By = countBy(deliveries30);
+    const prev30By = countBy(deliveriesPrev30);
+    const deliveriesBy = new Map(deliveries.map((d) => [d.organizationId, d]));
+    const auditsBy = new Map(audits.map((a) => [a.organizationId, a]));
+    const userCount = (orgId: string, pick: (u: { role: string; active: boolean }) => boolean) =>
+      users.filter((u) => u.organizationId === orgId && pick(u)).reduce((s, u) => s + u._count._all, 0);
 
     const latest = (...dates: (Date | null | undefined)[]) => {
       const ts = dates.filter((d): d is Date => !!d).map((d) => d.getTime());
@@ -68,7 +115,7 @@ export async function GET(req: Request) {
     };
 
     const items: PlatformOrgRow[] = orgs.map((o) => {
-      const del = deliveries.find((d) => d.organizationId === o.id);
+      const del = deliveriesBy.get(o.id);
       return {
         id: o.id,
         name: o.name,
@@ -81,17 +128,24 @@ export async function GET(req: Request) {
         subscriptionPriceBdt: o.subscriptionPriceBdt,
         createdAt: o.createdAt.toISOString(),
         counts: {
-          admins: users.find((u) => u.organizationId === o.id && u.role === "ADMIN")?._count._all ?? 0,
-          drivers: users.find((u) => u.organizationId === o.id && u.role === "DRIVER")?._count._all ?? 0,
-          vehicles: vehicles.find((v) => v.organizationId === o.id)?._count._all ?? 0,
+          // Active accounts only (unchanged meaning); `users` below counts every account.
+          admins: userCount(o.id, (u) => u.role === "ADMIN" && u.active),
+          drivers: userCount(o.id, (u) => u.role === "DRIVER" && u.active),
+          vehicles: vehiclesBy.get(o.id) ?? 0,
           deliveries: del?._count._all ?? 0,
-          deliveriesThisMonth: deliveriesMonth.find((d) => d.organizationId === o.id)?._count._all ?? 0,
+          deliveriesThisMonth: monthBy.get(o.id) ?? 0,
         },
-        lastActivityAt: latest(del?._max.createdAt, audits.find((a) => a.organizationId === o.id)?._max.createdAt),
+        lastActivityAt: latest(del?._max.createdAt, auditsBy.get(o.id)?._max.createdAt),
+        contactEmail: o.contactEmail,
+        planActive: o.planRecord.active,
+        users: userCount(o.id, () => true),
+        deliveries30d: d30By.get(o.id) ?? 0,
+        deliveriesPrev30d: prev30By.get(o.id) ?? 0,
       };
     });
 
-    return ok(paged(items, total, q.page, ORG_PAGE_SIZE));
+    const result: PlatformOrgList = { ...paged(items, total, pageNo, pageSize), summary };
+    return ok(result);
   } catch (e) {
     return fail(e);
   }
