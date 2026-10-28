@@ -16,6 +16,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Card, CardContent } from "@/components/ui/card";
+import { DeveloperCredit } from "@/components/shared/developer-credit";
 
 // One-click demo sign-in exists only for demo deployments (NEXT_PUBLIC_DEMO_MODE=true),
 // never on a production instance holding real customer data.
@@ -250,7 +251,11 @@ export function LoginView({ onCreateAccount }: { onCreateAccount?: () => void })
       <footer className="border-t bg-background">
         <div className="mx-auto flex max-w-7xl flex-col items-center justify-between gap-1 px-6 py-3 text-xs text-muted-foreground sm:flex-row">
           <span>© {new Date().getFullYear()} FleetFlow — Fleet &amp; Delivery Management</span>
-          <span>Multi-tenant · Role-based access · Audited</span>
+          <div className="flex flex-col items-center gap-1.5 sm:flex-row sm:gap-3">
+            <span>Multi-tenant · Role-based access · Audited</span>
+            <span aria-hidden="true" className="hidden h-3 w-px bg-border sm:block" />
+            <DeveloperCredit />
+          </div>
         </div>
       </footer>
     </div>

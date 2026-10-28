@@ -51,6 +51,7 @@ import {
   type SidebarNavGroup,
 } from "@/components/shared/sidebar/premium-sidebar";
 import { useSidebarCollapsed } from "@/components/shared/sidebar/use-sidebar-collapsed";
+import { DeveloperCredit } from "@/components/shared/developer-credit";
 
 const ADMIN_NAV: { section: string; items: { view: AppView; label: string; icon: typeof LayoutDashboard }[] }[] = [
   {
@@ -548,9 +549,17 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         <main className={cn("flex-1 px-4 py-5 md:px-6 md:py-6", isDriver && "pb-[calc(6rem+env(safe-area-inset-bottom))] md:pb-6")}>{children}</main>
 
         <footer className={cn("mt-auto border-t bg-background", isDriver && "hidden md:block")}>
-          <div className="flex flex-col items-center justify-between gap-1 px-6 py-3 text-xs text-muted-foreground sm:flex-row">
-            <span>© {new Date().getFullYear()} FleetFlow — Fleet &amp; Delivery Management</span>
-            <span>{session?.organizationName ?? ""}</span>
+          <div className="flex flex-col items-center justify-between gap-1 px-6 py-3 text-xs text-muted-foreground md:flex-row md:gap-6">
+            <span className="shrink-0">© {new Date().getFullYear()} FleetFlow — Fleet &amp; Delivery Management</span>
+            <div className="flex min-w-0 max-w-full flex-col items-center gap-1.5 md:flex-row md:gap-3">
+              {session?.organizationName && (
+                <>
+                  <span className="max-w-full truncate" title={session.organizationName}>{session.organizationName}</span>
+                  <span aria-hidden="true" className="hidden h-3 w-px shrink-0 bg-border md:block" />
+                </>
+              )}
+              <DeveloperCredit />
+            </div>
           </div>
         </footer>
       </div>

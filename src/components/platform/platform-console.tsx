@@ -34,6 +34,7 @@ import {
   type SidebarNavGroup,
 } from "@/components/shared/sidebar/premium-sidebar";
 import { useSidebarCollapsed } from "@/components/shared/sidebar/use-sidebar-collapsed";
+import { DeveloperCredit } from "@/components/shared/developer-credit";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -377,9 +378,13 @@ function ConsoleShell({
           </main>
 
           <footer className="mt-auto border-t bg-background">
-            <div className="flex flex-col items-center justify-between gap-1 px-6 py-3 text-xs text-muted-foreground sm:flex-row">
-              <span>© {new Date().getFullYear()} FleetFlow — Platform operations</span>
-              <span>Signed in as {admin.email}</span>
+            <div className="flex flex-col items-center justify-between gap-1 px-6 py-3 text-xs text-muted-foreground md:flex-row md:gap-6">
+              <span className="shrink-0">© {new Date().getFullYear()} FleetFlow — Platform operations</span>
+              <div className="flex min-w-0 max-w-full flex-col items-center gap-1.5 md:flex-row md:gap-3">
+                <span className="max-w-full truncate" title={admin.email}>Signed in as {admin.email}</span>
+                <span aria-hidden="true" className="hidden h-3 w-px shrink-0 bg-border md:block" />
+                <DeveloperCredit tone="violet" />
+              </div>
             </div>
           </footer>
         </div>
