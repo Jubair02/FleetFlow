@@ -3,8 +3,9 @@ generator client {
 }
 
 datasource db {
-  provider = "postgresql"
-  url      = env("DATABASE_URL")
+  provider  = "postgresql"
+  url       = env("DATABASE_URL") // pooled — used by the app at runtime
+  directUrl = env("DIRECT_URL") // non-pooled — used by prisma migrate
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -83,6 +84,18 @@ model Session {
   user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   expiresAt DateTime
   createdAt DateTime @default(now())
+
+  @@index([userId])
+}
+
+// Failure counters for login / sign-up / password throttling (src/lib/rate-limit.ts).
+// Shared by every server instance; rows expire with their window.
+model RateLimit {
+  key     String   @id // e.g. "email:ann@example.com", "ip:203.0.113.7", "signup:203.0.113.7"
+  count   Int
+  resetAt DateTime
+
+  @@index([resetAt])
 }
 
 model DriverProfile {

@@ -2,14 +2,14 @@ import { db } from "@/lib/db";
 import { ApiError, fail, ok, requireDriver } from "@/lib/api-helpers";
 import { ACTIVE_JOB_STATUSES, type DeliveryStatus } from "@/lib/constants";
 import { TX_OPTIONS, closeAssignment, lockDelivery } from "@/lib/delivery";
-import { deletePodFile, savePodFile } from "@/lib/storage";
+import { MAX_POD_FILE_BYTES, PodFileError, deletePodFile, savePodFile } from "@/lib/storage";
 import { auditData, bestEffort, notifyAdmins, sendCustomerOutcomeEmail } from "@/lib/notify";
 
 type Params = { params: Promise<{ id: string }> };
 
-// Whole multipart body cap — the 8 MB image plus form fields/boundaries.
-const MAX_BODY_BYTES = 9 * 1024 * 1024;
-const MAX_FILE_BYTES = 8 * 1024 * 1024;
+// Whole multipart body cap — the image plus form fields/boundaries. Stays
+// under Vercel's ~4.5 MB request limit; the driver app downsizes photos first.
+const MAX_BODY_BYTES = MAX_POD_FILE_BYTES + 256 * 1024;
 
 type PodTarget = { status: string; assignments: { id: string; driverId: string }[] };
 
@@ -46,7 +46,7 @@ export async function POST(req: Request, { params }: Params) {
     if (!lengthHeader) throw new ApiError(411, "Content-Length is required");
     const length = Number(lengthHeader);
     if (!Number.isFinite(length) || length < 0) throw new ApiError(400, "Invalid Content-Length");
-    if (length > MAX_BODY_BYTES) throw new ApiError(413, "File too large (max 8 MB)");
+    if (length > MAX_BODY_BYTES) throw new ApiError(413, "File too large (max 4 MB)");
 
     const form = await req.formData().catch(() => null);
     if (!form) throw new ApiError(400, "Expected multipart form data");
@@ -58,7 +58,7 @@ export async function POST(req: Request, { params }: Params) {
     if (!(file instanceof File)) throw new ApiError(400, "A proof image is required");
     if (recipientName.length > 120) throw new ApiError(400, "Recipient name is too long (max 120 characters)");
     if (complete && recipientName.length < 2) throw new ApiError(400, "Recipient name is required to complete the delivery");
-    if (file.size > MAX_FILE_BYTES) throw new ApiError(413, "File too large (max 8 MB)");
+    if (file.size > MAX_POD_FILE_BYTES) throw new ApiError(413, "File too large (max 4 MB)");
 
     // authorize before touching storage
     const current = await db.delivery.findFirst({
@@ -73,7 +73,9 @@ export async function POST(req: Request, { params }: Params) {
     try {
       stored = await savePodFile(buffer, file.name || "proof.png");
     } catch (e) {
-      throw new ApiError(400, e instanceof Error ? e.message : "Invalid file");
+      // Only problems with the file itself are shown; storage failures are logged by fail().
+      if (e instanceof PodFileError) throw new ApiError(400, e.message);
+      throw e;
     }
 
     let result;

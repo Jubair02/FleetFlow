@@ -26,8 +26,19 @@ export function senderName(companyName: string | null | undefined): string {
   return company ? `${company} via FleetFlow` : "FleetFlow";
 }
 
+/**
+ * Public base URL for links in emails: APP_URL, else the Vercel production
+ * domain, else localhost (development only). Production refuses to start
+ * without one (src/instrumentation.ts), so customers never get localhost links.
+ */
 export function appBaseUrl(appUrl: string | undefined = process.env.APP_URL): string {
-  return (appUrl?.trim() || DEFAULT_APP_URL).replace(/\/+$/, "");
+  const vercel = process.env.VERCEL_PROJECT_PRODUCTION_URL?.trim();
+  return (appUrl?.trim() || (vercel ? `https://${vercel}` : DEFAULT_APP_URL)).replace(/\/+$/, "");
+}
+
+/** True when emailed links would point somewhere real (not the localhost fallback). */
+export function hasPublicAppUrl(): boolean {
+  return !!(process.env.APP_URL?.trim() || process.env.VERCEL_PROJECT_PRODUCTION_URL?.trim());
 }
 
 /** Public tracking page for a delivery (`/?track=<token>`). */

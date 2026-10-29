@@ -47,7 +47,7 @@ export async function authenticate(rawEmail: string, password: string, ip: strin
 
   // Throttle per account and per client so neither guessing nor CPU flooding scales.
   const keys = [`email:${email}`, `ip:${ip}`];
-  const wait = Math.max(...keys.map(retryAfter));
+  const wait = Math.max(...(await Promise.all(keys.map(retryAfter))));
   if (wait > 0) {
     throw new ApiError(429, `Too many failed sign-in attempts. Try again in ${Math.ceil(wait / 60)} minute(s).`);
   }
@@ -66,7 +66,7 @@ export async function authenticate(rawEmail: string, password: string, ip: strin
   ]);
 
   if (admin && adminOk && admin.active) {
-    clearFailures(keys[0]); // only the account key — a valid login must not reset the per-client counter
+    await clearFailures(keys[0]); // only the account key — a valid login must not reset the per-client counter
     const updated = await db.platformAdmin.update({ where: { id: admin.id }, data: { lastLoginAt: new Date() } });
     await createPlatformSession(admin.id);
     await db.platformAuditLog.create({
@@ -76,7 +76,7 @@ export async function authenticate(rawEmail: string, password: string, ip: strin
   }
 
   if (user && userOk) {
-    clearFailures(keys[0]);
+    await clearFailures(keys[0]);
     if (user.organization.status !== "ACTIVE") {
       throw new ApiError(403, "Your company's FleetFlow account is suspended. Contact FleetFlow support.");
     }
@@ -88,7 +88,7 @@ export async function authenticate(rawEmail: string, password: string, ip: strin
     return { kind: "tenant", user: updated, redirectTo: "/" };
   }
 
-  keys.forEach(recordFailure);
+  await Promise.all(keys.map(recordFailure));
   if (admin) {
     await db.platformAuditLog.create({
       data: platformAuditData({

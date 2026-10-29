@@ -41,6 +41,19 @@ export async function deleteOtherSessions(tx: Prisma.TransactionClient, userId: 
   });
 }
 
+/**
+ * The caller's IP, for rate limiting and audit rows. The left of
+ * X-Forwarded-For is whatever the client sent, so it is never trusted:
+ * - on Vercel, the platform sets x-vercel-forwarded-for / x-real-ip itself;
+ * - elsewhere, the entry TRUSTED_PROXY_HOPS from the right (default 1) is
+ *   the one our own reverse proxy appended.
+ */
 export function clientIp(req: Request): string {
-  return req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || req.headers.get("x-real-ip") || "unknown";
+  const h = req.headers;
+  if (process.env.VERCEL) {
+    return h.get("x-vercel-forwarded-for")?.split(",")[0]?.trim() || h.get("x-real-ip") || "unknown";
+  }
+  const hops = Math.max(1, Number(process.env.TRUSTED_PROXY_HOPS) || 1);
+  const chain = (h.get("x-forwarded-for") ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+  return chain[chain.length - hops] || h.get("x-real-ip") || "unknown";
 }

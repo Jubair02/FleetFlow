@@ -14,9 +14,44 @@ import { SignaturePad } from "./signature-pad";
 import { PRESS } from "./job-utils";
 import { SheetBody, SheetDialogContent, SheetFooter, SheetHeader } from "./ui";
 
-/** Client-side cap (the server rejects anything above ~9 MB). */
-const MAX_PHOTO_BYTES = 8 * 1024 * 1024;
+/** Upload cap — matches the server (MAX_POD_FILE_BYTES in src/lib/storage.ts). */
+const MAX_UPLOAD_BYTES = 4 * 1024 * 1024;
+/** Raw camera photos above this are refused before we even try to shrink them. */
+const MAX_PICKED_BYTES = 30 * 1024 * 1024;
+/** Photos are downscaled so the long side is at most this many pixels. */
+const MAX_PHOTO_EDGE = 1600;
 const MAX_RECIPIENT_NAME = 120;
+
+/**
+ * Downscale and re-encode a photo as JPEG so it uploads quickly on mobile data
+ * and fits the server cap. Returns the original if it can't be decoded or
+ * shrinking wouldn't help.
+ */
+async function shrinkPhoto(file: File): Promise<File> {
+  let bitmap: ImageBitmap;
+  try {
+    bitmap = await createImageBitmap(file, { imageOrientation: "from-image" });
+  } catch {
+    return file;
+  }
+  try {
+    const scale = Math.min(1, MAX_PHOTO_EDGE / Math.max(bitmap.width, bitmap.height));
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.round(bitmap.width * scale);
+    canvas.height = Math.round(bitmap.height * scale);
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return file;
+    ctx.fillStyle = "#ffffff"; // transparent PNGs → white, not black, as JPEG
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+    const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.82));
+    if (!blob || blob.size >= file.size) return file;
+    const base = file.name.replace(/\.[^.]+$/, "") || "photo";
+    return new File([blob], `${base}.jpg`, { type: "image/jpeg" });
+  } finally {
+    bitmap.close();
+  }
+}
 
 /** Flatten the (transparent) signature canvas onto white and encode it as PNG. */
 function signatureBlob(canvas: HTMLCanvasElement): Promise<Blob | null> {
@@ -61,11 +96,22 @@ export function PodDialog({
     [],
   );
 
-  const pickPhoto = (picked: File | null) => {
+  const [preparing, setPreparing] = useState(false);
+  const busy = submitting || preparing;
+
+  const pickPhoto = async (picked: File | null) => {
     let file = picked;
-    if (file && file.size > MAX_PHOTO_BYTES) {
-      toast.error("That photo is too large (max 8 MB) — retake it or pick a smaller image");
+    if (file && file.size > MAX_PICKED_BYTES) {
+      toast.error("That photo is too large — retake it or pick a smaller image");
       file = null;
+    }
+    if (file) {
+      setPreparing(true);
+      file = await shrinkPhoto(file).finally(() => setPreparing(false));
+      if (file.size > MAX_UPLOAD_BYTES) {
+        toast.error("That photo is too large (max 4 MB) — retake it or pick a smaller image");
+        file = null;
+      }
     }
     if (photoUrlRef.current) {
       URL.revokeObjectURL(photoUrlRef.current);
@@ -175,7 +221,7 @@ export function PodDialog({
 
           <div className="flex flex-col gap-2">
             <Label htmlFor="pod-photo" className="text-sm font-medium">
-              Photo proof <span className="font-normal text-muted-foreground">(max 8 MB)</span>
+              Photo proof
             </Label>
             {photoUrl && photoFile ? (
               <div className="flex items-center gap-3 rounded-xl border border-border/70 bg-muted/40 p-3 dark:border-white/10">
@@ -235,9 +281,9 @@ export function PodDialog({
           <Button type="button" variant="outline" onClick={onClose} disabled={submitting} className="h-12 rounded-xl sm:h-11">
             Cancel
           </Button>
-          <Button type="button" onClick={submit} disabled={submitting} className={cn("h-12 rounded-xl text-[15px] font-semibold sm:h-11", PRESS)}>
-            {submitting ? <Loader2 className="size-4 animate-spin" aria-hidden="true" /> : <CheckCircle2 className="size-4" aria-hidden="true" />}
-            {submitting ? "Recording…" : "Complete delivery"}
+          <Button type="button" onClick={submit} disabled={busy} className={cn("h-12 rounded-xl text-[15px] font-semibold sm:h-11", PRESS)}>
+            {busy ? <Loader2 className="size-4 animate-spin" aria-hidden="true" /> : <CheckCircle2 className="size-4" aria-hidden="true" />}
+            {submitting ? "Recording…" : preparing ? "Preparing photo…" : "Complete delivery"}
           </Button>
         </SheetFooter>
       </SheetDialogContent>

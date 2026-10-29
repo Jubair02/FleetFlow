@@ -1,6 +1,8 @@
 /**
  * FleetFlow seed — realistic demo data for two organizations.
  * Run (DESTRUCTIVE — wipes the database): ALLOW_DESTRUCTIVE_SEED=1 npx tsx prisma/seed.ts
+ * Refuses unless DATABASE_URL is a local database or uses a non-public ?schema=.
+ * Plans come from the baseline migration, so run `npx prisma migrate deploy` first.
  */
 import { PrismaClient } from "@prisma/client";
 import { randomBytes, scryptSync } from "crypto";
@@ -190,6 +192,19 @@ const FAILED_SPECS: { day: number; hour: number; reason: string; driverIdx: numb
 
 const STORAGE = path.join(process.cwd(), "storage", "pod");
 
+/** Local database, or a non-public schema such as ?schema=fleetflow_e2e. */
+function isDisposableDatabase(url: string | undefined): boolean {
+  if (!url) return false;
+  try {
+    const u = new URL(url);
+    const local = ["localhost", "127.0.0.1", "::1", "[::1]"].includes(u.hostname);
+    const schema = u.searchParams.get("schema");
+    return local || (!!schema && schema !== "public");
+  } catch {
+    return false;
+  }
+}
+
 async function main() {
   // The seed WIPES every table and all POD files. Never let it run by accident
   // against a shared/production database.
@@ -199,15 +214,24 @@ async function main() {
         "Re-run with ALLOW_DESTRUCTIVE_SEED=1 only against a disposable database."
     );
   }
+  // Even then, never the shared database's real tables.
+  if (!isDisposableDatabase(process.env.DATABASE_URL)) {
+    throw new Error(
+      "Refusing to seed: DATABASE_URL is neither a local database nor a non-public schema. " +
+        "Point it at localhost or add ?schema=<disposable_schema>."
+    );
+  }
   console.log("Seeding FleetFlow…");
 
   // wipe (respect FK order)
   await db.session.deleteMany();
+  await db.rateLimit.deleteMany();
   await db.notification.deleteMany();
   await db.proofOfDelivery.deleteMany();
   await db.deliveryEvent.deleteMany();
   await db.assignment.deleteMany();
   await db.delivery.deleteMany();
+  await db.importBatch.deleteMany();
   await db.vehicle.deleteMany();
   await db.driverProfile.deleteMany();
   await db.user.deleteMany();

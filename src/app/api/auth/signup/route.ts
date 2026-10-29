@@ -30,11 +30,11 @@ export async function POST(req: Request) {
 
     // Every attempt counts (successful or not): "signup:" keys allow 5 per 15 minutes per client.
     const key = `signup:${clientIp(req)}`;
-    const wait = retryAfter(key);
+    const wait = await retryAfter(key);
     if (wait > 0) {
       throw new ApiError(429, `Too many sign-up attempts. Try again in ${Math.ceil(wait / 60)} minute(s).`);
     }
-    recordFailure(key);
+    await recordFailure(key);
 
     const parsed = signupSchema.safeParse(await readJson<unknown>(req));
     if (!parsed.success) throw new ApiError(400, firstError(parsed.error));

@@ -1,10 +1,9 @@
 "use client";
 
-import { AlertTriangle, Check, CreditCard, Lock, Mail, Minus } from "lucide-react";
+import { AlertTriangle, CalendarCheck, CalendarClock, Check, CreditCard, Lock, Mail, Sparkles, Wallet } from "lucide-react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Skeleton } from "@/components/ui/skeleton";
 import { ApiRequestError, useApiData } from "@/lib/api-client";
@@ -175,16 +174,24 @@ function usageState(used: number, limit: number | null): UsageState {
 }
 
 const BAR_TONE: Record<UsageState, string> = {
-  ok: "bg-emerald-500",
+  ok: "bg-gradient-to-r from-emerald-500 to-teal-500",
   near: "bg-amber-500",
   at: "bg-amber-500",
   over: "bg-rose-500",
-  unlimited: "bg-emerald-500",
+  unlimited: "bg-gradient-to-r from-emerald-500/40 to-teal-500/40",
 };
 
-function UsageRow({ label, used, limit }: { label: string; used: number; limit: number | null }) {
+const TILE_TONE: Record<UsageState, string> = {
+  ok: "",
+  near: "border-amber-300/70 dark:border-amber-800/70",
+  at: "border-amber-300/70 dark:border-amber-800/70",
+  over: "border-rose-300/80 bg-rose-50/40 dark:border-rose-900 dark:bg-rose-950/20",
+  unlimited: "",
+};
+
+function UsageTile({ label, used, limit }: { label: string; used: number; limit: number | null }) {
   const state = usageState(used, limit);
-  const width = limit === null ? 0 : limit === 0 ? 100 : Math.min(100, (used / limit) * 100);
+  const width = limit === null || limit === 0 ? 100 : Math.min(100, (used / limit) * 100);
   const note =
     state === "over"
       ? `Over the limit by ${used - (limit ?? 0)}. Existing records are kept, but new ones can't be added until you upgrade or reduce usage.`
@@ -194,20 +201,21 @@ function UsageRow({ label, used, limit }: { label: string; used: number; limit: 
           ? "Approaching the limit."
           : null;
   return (
-    <li className="flex flex-col gap-1.5">
-      <div className="flex items-baseline justify-between gap-3 text-sm">
-        <span className="first-letter:uppercase">{label}</span>
+    <li className={cn("flex flex-col gap-3 rounded-xl border bg-card p-4", TILE_TONE[state])}>
+      <span className="text-xs font-medium text-muted-foreground first-letter:uppercase">{label}</span>
+      <span className="flex items-baseline gap-1.5 tabular-nums">
         <span
           className={cn(
-            "shrink-0 tabular-nums",
-            state === "over" ? "font-medium text-rose-600 dark:text-rose-400" : state === "near" || state === "at" ? "font-medium text-amber-600 dark:text-amber-400" : "text-muted-foreground"
+            "text-2xl leading-none font-semibold tracking-tight",
+            state === "over" ? "text-rose-600 dark:text-rose-400" : state === "near" || state === "at" ? "text-amber-600 dark:text-amber-400" : ""
           )}
         >
-          {limit === null ? `${used} · unlimited` : `${used} of ${limit}`}
+          {used.toLocaleString("en-US")}
         </span>
-      </div>
+        <span className="text-sm text-muted-foreground">{limit === null ? "· unlimited" : `/ ${limit.toLocaleString("en-US")}`}</span>
+      </span>
       <div
-        className="h-2 w-full overflow-hidden rounded-full bg-muted"
+        className="h-1.5 w-full overflow-hidden rounded-full bg-muted"
         role="meter"
         aria-label={label}
         aria-valuemin={0}
@@ -215,7 +223,7 @@ function UsageRow({ label, used, limit }: { label: string; used: number; limit: 
         aria-valuenow={used}
         aria-valuetext={limit === null ? `${used}, unlimited` : `${used} of ${limit}`}
       >
-        {limit !== null && <div className={cn("h-full rounded-full transition-all", BAR_TONE[state])} style={{ width: `${width}%` }} />}
+        <div className={cn("h-full rounded-full transition-[width] duration-500", BAR_TONE[state])} style={{ width: `${width}%` }} />
       </div>
       {note && (
         <p className={cn("text-xs", state === "over" ? "text-rose-600 dark:text-rose-400" : "text-amber-600 dark:text-amber-400")}>{note}</p>
@@ -343,14 +351,43 @@ export function PlanCards({
 
 // ── Panel ────────────────────────────────────────────────────
 
-function DetailRow({ label, children }: { label: string; children: React.ReactNode }) {
+const PANEL = "rounded-2xl border bg-card text-card-foreground shadow-[0_1px_2px_rgb(0_0_0/0.04)]";
+
+const STATUS_TONE: Record<string, string> = {
+  ACTIVE: "border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-900 dark:bg-emerald-950/40 dark:text-emerald-300",
+  TRIAL: "border-sky-200 bg-sky-50 text-sky-700 dark:border-sky-900 dark:bg-sky-950/40 dark:text-sky-300",
+  PAST_DUE: "border-amber-200 bg-amber-50 text-amber-700 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-300",
+  CANCELLED: "border-zinc-200 bg-zinc-100 text-zinc-600 dark:border-zinc-700 dark:bg-zinc-800/60 dark:text-zinc-300",
+};
+
+function DetailRow({ icon: Icon, label, children }: { icon: typeof CreditCard; label: string; children: React.ReactNode }) {
   return (
-    <div className="flex flex-col gap-0.5">
-      <dt className="text-xs text-muted-foreground">{label}</dt>
-      <dd className="text-sm">{children}</dd>
+    <div className="flex min-w-0 gap-2.5">
+      <Icon className="mt-0.5 size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
+      <div className="min-w-0">
+        <dt className="text-xs text-muted-foreground">{label}</dt>
+        <dd className="text-sm font-medium">{children}</dd>
+      </div>
     </div>
   );
 }
+
+function SectionHeading({ id, title, children }: { id: string; title: string; children?: React.ReactNode }) {
+  return (
+    <div className="flex flex-wrap items-end justify-between gap-x-4 gap-y-1">
+      <h3 id={id} className="text-base font-semibold">
+        {title}
+      </h3>
+      {children}
+    </div>
+  );
+}
+
+const UPGRADE_STEPS = [
+  { title: "Tell us what you need", body: "Contact the FleetFlow team with the plan and billing cycle (monthly or annual) you want." },
+  { title: "Pay the invoice", body: "We send an invoice — pay by bKash or bank transfer." },
+  { title: "We switch your plan", body: "As soon as payment is confirmed. Your data stays exactly as it is." },
+];
 
 export function PlanPanel() {
   const { data, error, reload } = useApiData<BillingData>("/api/billing");
@@ -373,15 +410,13 @@ export function PlanPanel() {
   if (!data) {
     return (
       <div className="flex flex-col gap-6" aria-busy="true">
-        <Card>
-          <CardContent className="flex flex-col gap-4">
-            <Skeleton className="h-5 w-40" />
-            {Array.from({ length: 4 }).map((_, i) => (
-              <Skeleton key={i} className="h-8 w-full" />
-            ))}
-          </CardContent>
-        </Card>
-        <Skeleton className="h-64 w-full" />
+        <Skeleton className="h-36 w-full rounded-2xl" />
+        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+          {Array.from({ length: 4 }).map((_, i) => (
+            <Skeleton key={i} className="h-28 w-full rounded-xl" />
+          ))}
+        </div>
+        <Skeleton className="h-64 w-full rounded-2xl" />
       </div>
     );
   }
@@ -401,112 +436,153 @@ export function PlanPanel() {
 
   return (
     <div className="flex flex-col gap-6">
-      <Card>
-        <CardHeader>
-          <div>
-            <CardTitle className="text-base">Your plan</CardTitle>
-            <CardDescription className="text-xs">Usage against your plan limits · deliveries count from the 1st of this month</CardDescription>
+      {/* ── current plan ── */}
+      <section className={PANEL} aria-labelledby="plan-current-title">
+        <div className="flex flex-col gap-5 p-5 sm:p-6 lg:flex-row lg:items-center lg:justify-between lg:gap-8">
+          <div className="flex min-w-0 items-start gap-4">
+            <span
+              className="flex size-12 shrink-0 items-center justify-center rounded-2xl bg-gradient-to-br from-emerald-600 to-teal-600 text-white shadow-[0_8px_20px_-8px_rgb(4_120_87/0.6)]"
+              aria-hidden="true"
+            >
+              <Sparkles className="size-5" />
+            </span>
+            <div className="min-w-0">
+              <p className="text-xs font-semibold tracking-wider text-muted-foreground uppercase">Current plan</p>
+              <div className="mt-0.5 flex flex-wrap items-center gap-2">
+                <h3 id="plan-current-title" className="text-2xl font-semibold tracking-tight">
+                  {plan.name}
+                </h3>
+                {/* skip "Trial · Trial" when the status just repeats the plan name */}
+                {sub?.status && (SUBSCRIPTION_LABELS[sub.status] ?? sub.status) !== plan.name && (
+                  <Badge variant="outline" className={STATUS_TONE[sub.status] ?? STATUS_TONE.CANCELLED}>
+                    {SUBSCRIPTION_LABELS[sub.status] ?? sub.status}
+                  </Badge>
+                )}
+              </div>
+              <p className="mt-1 text-sm text-muted-foreground tabular-nums">
+                {sub && agreed != null
+                  ? `${formatCyclePrice(agreed, cycle)} · ${CYCLE_LABELS[cycle] ?? cycle} billing`
+                  : sub || free
+                    ? "Free — nothing to pay"
+                    : plan.description}
+              </p>
+            </div>
           </div>
-          <CardAction>
-            <Badge variant="outline" className="border-primary/30 bg-primary/10 text-primary">
-              <CreditCard className="size-3.5" aria-hidden="true" /> {plan.name}
-            </Badge>
-          </CardAction>
-        </CardHeader>
-        <CardContent className="flex flex-col gap-5">
           {sub && (
-            <dl className="grid grid-cols-2 gap-x-6 gap-y-3 rounded-lg border bg-muted/30 p-3 sm:grid-cols-4">
-              <DetailRow label="Billing cycle">{CYCLE_LABELS[cycle] ?? cycle}</DetailRow>
-              <DetailRow label="Your price">
+            <dl className="grid grid-cols-1 gap-x-8 gap-y-4 rounded-xl border bg-muted/30 p-4 sm:grid-cols-3 lg:min-w-[30rem]">
+              <DetailRow icon={Wallet} label="Your price">
                 <span className="tabular-nums">{formatCyclePrice(agreed, cycle)}</span>
                 {priceDiffers && (
-                  <span className="block text-xs text-muted-foreground tabular-nums">
+                  <span className="block text-xs font-normal text-muted-foreground tabular-nums">
                     List price now {list == null ? "not offered on this cycle" : formatCyclePrice(list, cycle)} — you keep your agreed price.
                   </span>
                 )}
               </DetailRow>
-              <DetailRow label="Paid until">
+              <DetailRow icon={CalendarCheck} label="Paid until">
                 {sub.paidUntil ? formatDate(sub.paidUntil) : "—"}
-                {sub.status && sub.status !== "ACTIVE" && <span className="block text-xs text-muted-foreground">{SUBSCRIPTION_LABELS[sub.status] ?? sub.status}</span>}
               </DetailRow>
-              <DetailRow label="On this plan since">{sub.planAssignedAt ? formatDate(sub.planAssignedAt) : "—"}</DetailRow>
+              <DetailRow icon={CalendarClock} label="On this plan since">
+                {sub.planAssignedAt ? formatDate(sub.planAssignedAt) : "—"}
+              </DetailRow>
             </dl>
           )}
-          {overLimits.length > 0 && (
-            <Alert className="border-amber-500/40 bg-amber-500/5">
-              <AlertTriangle className="size-4 text-amber-600 dark:text-amber-400" />
-              <AlertTitle>Plan limit reached</AlertTitle>
-              <AlertDescription>
-                {overLimits.map((r) => resourceLabels[r]).join(", ")}: new additions are blocked. Nothing you already have is removed or
-                disabled.
-              </AlertDescription>
-            </Alert>
-          )}
-          <ul className="grid gap-x-8 gap-y-5 md:grid-cols-2">
-            {RESOURCE_ORDER.map((r) => (
-              <UsageRow key={r} label={resourceLabels[r]} used={usage[r]} limit={plan.limits[r]} />
-            ))}
-          </ul>
-          <div className="border-t pt-4">
-            <h3 className="mb-2 text-xs font-medium text-muted-foreground">Features</h3>
-            <ul className="grid gap-2 sm:grid-cols-3">
-              {FEATURE_KEYS.map((f) => {
-                const on = features.includes(f);
-                return (
-                  <li key={f} className={cn("flex items-start gap-2 text-sm", !on && "text-muted-foreground")}>
-                    {on ? (
-                      <Check className="mt-0.5 size-4 shrink-0 text-emerald-600 dark:text-emerald-400" aria-hidden="true" />
-                    ) : (
-                      <Minus className="mt-0.5 size-4 shrink-0 opacity-60" aria-hidden="true" />
-                    )}
-                    <span>
-                      {FEATURES[f].label}
-                      <span className="block text-xs text-muted-foreground">{on ? "Included" : "Not included — available on higher plans"}</span>
-                    </span>
-                  </li>
-                );
-              })}
-            </ul>
-          </div>
-          {free && (
-            <p className="text-xs text-muted-foreground">You are on a free plan. Pick a plan below when you are ready — there is nothing to pay online.</p>
-          )}
-        </CardContent>
-      </Card>
-
-      <section aria-labelledby="plan-pricing-title" className="flex flex-col gap-3">
-        <div>
-          <h2 id="plan-pricing-title" className="text-base font-semibold">
-            Proposed pricing
-          </h2>
-          <p className="text-xs font-medium text-amber-600 dark:text-amber-400">{PROPOSED_PRICING_NOTE}</p>
         </div>
+
+        {/* features */}
+        <div className="border-t px-5 py-4 sm:px-6">
+          <ul className="flex flex-wrap gap-2" aria-label="Plan features">
+            {FEATURE_KEYS.map((f) => {
+              const on = features.includes(f);
+              return (
+                <li
+                  key={f}
+                  className={cn(
+                    "inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-xs font-medium",
+                    on
+                      ? "border-emerald-200 bg-emerald-50 text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950/40 dark:text-emerald-300"
+                      : "border-dashed text-muted-foreground"
+                  )}
+                  title={on ? "Included" : "Not included — available on higher plans"}
+                >
+                  {on ? <Check className="size-3.5" aria-hidden="true" /> : <Lock className="size-3 opacity-70" aria-hidden="true" />}
+                  {FEATURES[f].label}
+                  <span className="sr-only">{on ? " — included" : " — not included, available on higher plans"}</span>
+                </li>
+              );
+            })}
+          </ul>
+        </div>
+      </section>
+
+      {/* ── usage ── */}
+      <section aria-labelledby="plan-usage-title" className="flex flex-col gap-3">
+        <SectionHeading id="plan-usage-title" title="Usage">
+          <p className="text-xs text-muted-foreground">Deliveries count from the 1st of this month</p>
+        </SectionHeading>
+        {overLimits.length > 0 && (
+          <Alert className="border-amber-500/40 bg-amber-500/5">
+            <AlertTriangle className="size-4 text-amber-600 dark:text-amber-400" />
+            <AlertTitle>Plan limit reached</AlertTitle>
+            <AlertDescription>
+              {overLimits.map((r) => resourceLabels[r]).join(", ")}: new additions are blocked. Nothing you already have is removed or
+              disabled.
+            </AlertDescription>
+          </Alert>
+        )}
+        <ul className="grid grid-cols-2 gap-3 xl:grid-cols-4">
+          {RESOURCE_ORDER.map((r) => (
+            <UsageTile key={r} label={resourceLabels[r]} used={usage[r]} limit={plan.limits[r]} />
+          ))}
+        </ul>
+        {free && <p className="text-xs text-muted-foreground">You are on a free plan. Pick a plan below when you are ready — there is nothing to pay online.</p>}
+      </section>
+
+      {/* ── pricing ── */}
+      <section aria-labelledby="plan-pricing-title" className="flex flex-col gap-3">
+        <SectionHeading id="plan-pricing-title" title="Proposed pricing">
+          <p className="text-xs font-medium text-amber-600 dark:text-amber-400">{PROPOSED_PRICING_NOTE}</p>
+        </SectionHeading>
         <PlanCards plans={data.plans} resourceLabels={resourceLabels} currentCode={plan.code} />
       </section>
 
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-base">How to upgrade</CardTitle>
-          <CardDescription className="text-xs">There is no online payment yet</CardDescription>
-        </CardHeader>
-        <CardContent className="flex flex-col gap-3 text-sm">
-          <ol className="flex list-decimal flex-col gap-1.5 pl-5 text-muted-foreground">
-            <li>Contact the FleetFlow team and tell us which plan and billing cycle (monthly or annual) you want.</li>
-            <li>We send an invoice; pay by bKash or bank transfer.</li>
-            <li>We switch your plan as soon as payment is confirmed — your data stays exactly as it is.</li>
-          </ol>
-          <p className="flex items-center gap-2 text-xs text-muted-foreground">
-            <Mail className="size-4 shrink-0" aria-hidden="true" />
-            {data.billingContact ? (
-              <span>
-                Invoices are sent to <span className="font-medium text-foreground">{data.billingContact}</span>.
+      {/* ── how to upgrade ── */}
+      <section className={cn(PANEL, "p-5 sm:p-6")} aria-labelledby="plan-upgrade-title">
+        <SectionHeading id="plan-upgrade-title" title="How to upgrade">
+          <p className="text-xs text-muted-foreground">There is no online payment yet</p>
+        </SectionHeading>
+        <ol className="mt-4 grid gap-4 md:grid-cols-3">
+          {UPGRADE_STEPS.map((s, i) => (
+            <li key={s.title} className="flex gap-3">
+              <span
+                className="flex size-8 shrink-0 items-center justify-center rounded-full bg-primary/10 text-sm font-semibold text-primary tabular-nums ring-1 ring-primary/20 ring-inset"
+                aria-hidden="true"
+              >
+                {i + 1}
               </span>
-            ) : (
-              <span>No billing email on file — add a contact email in your organization settings so invoices reach you.</span>
-            )}
-          </p>
-        </CardContent>
-      </Card>
+              <div className="min-w-0">
+                <p className="text-sm font-medium">{s.title}</p>
+                <p className="mt-0.5 text-xs text-pretty text-muted-foreground">{s.body}</p>
+              </div>
+            </li>
+          ))}
+        </ol>
+        <p className="mt-5 flex items-start gap-2.5 rounded-xl border bg-muted/30 px-4 py-3 text-xs text-muted-foreground">
+          <Mail className="mt-px size-4 shrink-0" aria-hidden="true" />
+          {data.billingContact ? (
+            <span>
+              Invoices are sent to <span className="font-medium text-foreground">{data.billingContact}</span>.
+            </span>
+          ) : (
+            <span>
+              No billing email on file —{" "}
+              <button type="button" className="font-medium text-primary underline-offset-4 hover:underline" onClick={() => goToSettings("company")}>
+                add a contact email
+              </button>{" "}
+              so invoices reach you.
+            </span>
+          )}
+        </p>
+      </section>
     </div>
   );
 }

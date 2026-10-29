@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { Prisma } from "@prisma/client";
+import * as Sentry from "@sentry/nextjs";
 import { getSessionUser, type SessionUser } from "@/lib/auth";
 
 export class ApiError extends Error {
@@ -32,13 +33,22 @@ export function fail(e: unknown) {
   if (e instanceof Prisma.PrismaClientValidationError) {
     return NextResponse.json({ error: "Invalid input" }, { status: 400 });
   }
+  // Handled here, so Next's onRequestError never sees it — report it ourselves.
+  Sentry.captureException(e);
   console.error("[api] unexpected error:", e);
   return NextResponse.json({ error: "Internal server error" }, { status: 500 });
 }
 
-export async function requireUser(): Promise<SessionUser> {
+/**
+ * By default a user who still has an admin-issued temporary password may only
+ * reach the endpoint that lets them replace it.
+ */
+export async function requireUser(opts: { allowPasswordChangePending?: boolean } = {}): Promise<SessionUser> {
   const user = await getSessionUser();
   if (!user) throw new ApiError(401, "Authentication required");
+  if (user.mustChangePassword && !opts.allowPasswordChangePending) {
+    throw new ApiError(403, "Change your temporary password before continuing");
+  }
   return user;
 }
 

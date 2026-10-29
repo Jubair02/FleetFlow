@@ -10,22 +10,22 @@ import { auditData } from "@/lib/notify";
 // POST /api/auth/password — the signed-in user changes their own password.
 export async function POST(req: Request) {
   try {
-    const user = await requireUser();
+    const user = await requireUser({ allowPasswordChangePending: true });
     const parsed = changePasswordSchema.safeParse(await readJson<unknown>(req));
     if (!parsed.success) throw new ApiError(400, firstError(parsed.error));
     const { currentPassword, newPassword } = parsed.data;
 
     // A stolen session must not be able to brute-force the current password.
     const key = `email:${user.email}`;
-    const wait = retryAfter(key);
+    const wait = await retryAfter(key);
     if (wait > 0) {
       throw new ApiError(429, `Too many failed attempts. Try again in ${Math.ceil(wait / 60)} minute(s).`);
     }
     if (!(await verifyPassword(currentPassword, user.passwordHash))) {
-      recordFailure(key);
+      await recordFailure(key);
       throw new ApiError(400, "Your current password is incorrect");
     }
-    clearFailures(key);
+    await clearFailures(key);
 
     const passwordHash = await hashPassword(newPassword);
     const keep = await currentSessionTokenHash();

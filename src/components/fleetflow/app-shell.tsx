@@ -130,16 +130,17 @@ function useLogout(onDone?: () => void) {
 type NotificationFeed = ReturnType<typeof useNotificationFeed>;
 
 /** One notifications feed per shell — shared by the header bell and the sidebar badge. */
-function useNotificationFeed() {
+function useNotificationFeed(enabled: boolean) {
   const bump = useAppStore((s) => s.bump);
-  const feed = useApiData<{ items: NotificationItem[]; unread: number }>("/api/notifications");
+  const feed = useApiData<{ items: NotificationItem[]; unread: number }>(enabled ? "/api/notifications" : null);
   const { data, reload } = feed;
 
   // poll for new notifications every 45s
   useEffect(() => {
+    if (!enabled) return;
     const t = setInterval(reload, 45000);
     return () => clearInterval(t);
-  }, [reload]);
+  }, [enabled, reload]);
 
   // New notifications (e.g. a fresh assignment) → refresh every mounted view.
   const prevUnread = useRef<number | null>(null);
@@ -440,7 +441,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     setPasswordSeq((n) => n + 1);
     setPasswordOpen(true);
   };
-  const notifications = useNotificationFeed();
+  const notifications = useNotificationFeed(!forcePasswordChange);
   const unread = notifications.data?.unread ?? 0;
   const [collapsed, setCollapsed] = useSidebarCollapsed("fleetflow:sidebar-collapsed:app");
 
@@ -546,7 +547,16 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           </div>
         </header>
 
-        <main className={cn("flex-1 px-4 py-5 md:px-6 md:py-6", isDriver && "pb-[calc(6rem+env(safe-area-inset-bottom))] md:pb-6")}>{children}</main>
+        <main className={cn("flex-1 px-4 py-5 md:px-6 md:py-6", isDriver && "pb-[calc(6rem+env(safe-area-inset-bottom))] md:pb-6")}>
+          {/* The API refuses everything else until the temporary password is replaced. */}
+          {forcePasswordChange ? (
+            <div className="mx-auto mt-16 max-w-md text-center text-sm text-muted-foreground">
+              Set your own password to continue using FleetFlow.
+            </div>
+          ) : (
+            children
+          )}
+        </main>
 
         <footer className={cn("mt-auto border-t bg-background", isDriver && "hidden md:block")}>
           <div className="flex flex-col items-center justify-between gap-1 px-6 py-3 text-xs text-muted-foreground md:flex-row md:gap-6">
