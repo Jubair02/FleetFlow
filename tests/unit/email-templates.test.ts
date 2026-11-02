@@ -18,8 +18,8 @@ describe("email templates", () => {
   });
 
   it("builds tracking URLs from APP_URL without double slashes", () => {
-    expect(trackingUrl("tok_1", "https://app.example.com/")).toBe("https://app.example.com/?track=tok_1");
-    expect(trackingUrl("a b", "https://x.io")).toBe("https://x.io/?track=a%20b");
+    expect(trackingUrl("tok_1", "https://app.example.com/")).toBe("https://app.example.com/track/tok_1");
+    expect(trackingUrl("a b", "https://x.io")).toBe("https://x.io/track/a%20b");
     expect(appBaseUrl("")).toBe("http://localhost:3000");
   });
 

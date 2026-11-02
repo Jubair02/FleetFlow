@@ -146,4 +146,9 @@ export const EVENT_TYPE_LABELS: Record<string, string> = {
   CANCELLED: "Cancelled",
   TRACKING_UPDATED: "Tracking link",
   OVERRIDE: "Override",
+  // Customer feedback from the tracking page (src/lib/customer-feedback.ts)
+  RATED: "Customer rating",
+  RESCHEDULE_REQUESTED: "Reschedule requested",
+  RESCHEDULE_ACCEPTED: "Reschedule accepted",
+  RESCHEDULE_DECLINED: "Reschedule declined",
 };

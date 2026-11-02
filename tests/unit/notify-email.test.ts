@@ -61,7 +61,7 @@ describe("customer emails", () => {
       recipientEmail: "Karim@Example.com",
       dedupeKey: "customer-tracking:d1:karim@example.com",
     });
-    expect(data.body).toContain("https://app.example.com/?track=tok123");
+    expect(data.body).toContain("https://app.example.com/track/tok123");
     const last = db.notification.updateMany.mock.calls.at(-1)![0];
     expect(last.data.status).toBe("SIMULATED");
   });

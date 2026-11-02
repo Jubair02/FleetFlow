@@ -2,9 +2,11 @@ import { db } from "@/lib/db";
 import { ApiError, fail, ok, requireUser } from "@/lib/api-helpers";
 import { getEmailStatus } from "@/lib/email";
 import { MAX_ATTEMPTS } from "@/lib/email/outbox";
+import { isStaffRole } from "@/lib/roles";
+import { getSmsStatus } from "@/lib/sms";
 
 // GET /api/notifications — the signed-in user's in-app notifications
-// GET /api/notifications?channel=EMAIL — admin view of the org's email outbox
+// GET /api/notifications?channel=EMAIL — staff view of the org's outbox (email and SMS rows)
 export async function GET(req: Request) {
   try {
     const user = await requireUser();
@@ -12,21 +14,26 @@ export async function GET(req: Request) {
     const channel = url.searchParams.get("channel") === "EMAIL" ? "EMAIL" : "IN_APP";
 
     if (channel === "EMAIL") {
-      if (user.role !== "ADMIN") throw new ApiError(403, "Admin access required");
-      // The org's email outbox: driver/admin emails and customer emails (no user account)
+      if (!isStaffRole(user.role)) throw new ApiError(403, "Admin or dispatcher access required");
+      // The org's outbox: driver/admin emails, customer emails and customer SMS (no user account)
+      const outbound = { in: ["EMAIL", "SMS"] };
+      // Dispatchers see delivery messages only: billing, subscription and account
+      // emails (no deliveryId) are for admins.
+      const scope = user.role === "ADMIN" ? {} : { deliveryId: { not: null } };
       const [items, failedRetryable] = await Promise.all([
         db.notification.findMany({
-          where: { channel: "EMAIL", organizationId: user.organizationId },
+          where: { channel: outbound, organizationId: user.organizationId, ...scope },
           orderBy: [{ createdAt: "desc" }, { id: "desc" }],
           take: 100,
         }),
         db.notification.count({
-          where: { channel: "EMAIL", organizationId: user.organizationId, status: "FAILED", attempts: { lt: MAX_ATTEMPTS } },
+          where: { channel: outbound, organizationId: user.organizationId, ...scope, status: "FAILED", attempts: { lt: MAX_ATTEMPTS } },
         }),
       ]);
       return ok({
         channel,
         emailStatus: getEmailStatus(),
+        smsStatus: getSmsStatus(),
         maxAttempts: MAX_ATTEMPTS,
         failedRetryable,
         items: items.map((n) => ({
@@ -34,7 +41,9 @@ export async function GET(req: Request) {
           type: n.type,
           title: n.title,
           body: n.body,
+          channel: n.channel,
           recipientEmail: n.recipientEmail,
+          recipientPhone: n.recipientPhone,
           deliveryId: n.deliveryId,
           readAt: n.readAt ? n.readAt.toISOString() : null,
           createdAt: n.createdAt.toISOString(),

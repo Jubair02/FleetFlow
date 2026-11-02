@@ -12,6 +12,7 @@ import {
   parseQuery, startOfUtcMonth, supportAuditData,
 } from "@/lib/platform-service";
 import type { CreateOrgResult, OrgStatus, PlatformOrgList, PlatformOrgRow, PlatformOrgSummary, SubscriptionStatus } from "@/lib/platform-types";
+import { trialEndFrom } from "@/lib/subscription";
 
 // GET /api/platform/organizations?search=&status=&plan=&page=&pageSize=&subscription=&from=&to=&export=1
 // → PlatformOrgList. ?export=1 returns every match (max ORG_EXPORT_CAP) as one page, with summary: null.
@@ -183,6 +184,7 @@ export async function POST(req: Request) {
             timezone: DEFAULT_TIMEZONE,
             status: "ACTIVE",
             subscriptionStatus: "TRIAL",
+            trialEndsAt: trialEndFrom(new Date()),
           },
         });
         const user = await tx.user.create({

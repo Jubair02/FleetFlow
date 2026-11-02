@@ -7,16 +7,17 @@ import { assertPlanLimit, getOrgPlan } from "@/lib/plans";
 import { generateTempPassword } from "@/lib/account";
 import { TX_OPTIONS } from "@/lib/delivery";
 import { auditData } from "@/lib/notify";
+import { STAFF_ROLES } from "@/lib/roles";
 
-// GET /api/staff — the organization's dispatcher/admin accounts (admin)
+// GET /api/staff — the organization's admin and dispatcher accounts (admin)
 export async function GET() {
   try {
     const user = await requireAdmin();
     const [admins, plan] = await Promise.all([
       db.user.findMany({
-        where: { organizationId: user.organizationId, role: "ADMIN" },
-        select: { id: true, name: true, email: true, active: true, mustChangePassword: true, lastLoginAt: true, createdAt: true },
-        orderBy: [{ active: "desc" }, { createdAt: "asc" }],
+        where: { organizationId: user.organizationId, role: { in: [...STAFF_ROLES] } },
+        select: { id: true, name: true, email: true, role: true, isOwner: true, active: true, mustChangePassword: true, lastLoginAt: true, createdAt: true },
+        orderBy: [{ active: "desc" }, { isOwner: "desc" }, { createdAt: "asc" }],
       }),
       getOrgPlan(db, user.organizationId),
     ]);
@@ -35,7 +36,7 @@ export async function GET() {
   }
 }
 
-// POST /api/staff — add a dispatcher/admin with a temporary password (admin).
+// POST /api/staff — add an admin or dispatcher with a temporary password (admin).
 // The temporary password is returned once; the new admin must change it at first sign-in.
 export async function POST(req: Request) {
   try {
@@ -57,7 +58,7 @@ export async function POST(req: Request) {
             name: data.name,
             email: data.email,
             passwordHash,
-            role: "ADMIN",
+            role: data.role,
             mustChangePassword: true,
           },
         });
@@ -65,7 +66,7 @@ export async function POST(req: Request) {
           data: auditData({
             organizationId: user.organizationId, actorId: user.id, actorName: user.name,
             action: "STAFF_CREATED", entityType: "User", entityId: u.id,
-            detail: { name: data.name, email: data.email },
+            detail: { name: data.name, email: data.email, role: data.role },
           }),
         });
         return u;

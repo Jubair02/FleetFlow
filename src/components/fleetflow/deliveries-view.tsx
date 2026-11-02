@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { ChevronLeft, ChevronRight, Download, FileSpreadsheet, Lock, Package, Plus, Search, X } from "lucide-react";
+import { CalendarClock, ChevronLeft, ChevronRight, Download, FileSpreadsheet, Lock, Package, Plus, Search, X } from "lucide-react";
 
 import { useApiData } from "@/lib/api-client";
 import { useAppStore } from "@/store/app-store";
@@ -9,7 +9,7 @@ import type { DeliveriesPage } from "@/lib/types";
 import { DELIVERY_STATUSES, PRIORITIES, PRIORITY_LABELS, STATUS_LABELS } from "@/lib/constants";
 import { PriorityBadge, StatusBadge } from "@/components/fleetflow/badges";
 import { Badge } from "@/components/ui/badge";
-import { formatDate, friendlyDueDate, truncate } from "@/lib/format";
+import { formatDate, formatTime, friendlyDueDate, truncate, formatBdt } from "@/lib/format";
 import { DeliveryDetailDialog } from "@/components/fleetflow/delivery-detail-dialog";
 import { DeliveryFormDialog } from "@/components/fleetflow/delivery-form-dialog";
 import { ImportDialog, TEMPLATE_URL, type ImportedBatch } from "@/components/fleetflow/import-dialog";
@@ -83,13 +83,25 @@ function PaginationBar({
   );
 }
 
+/** A status from the address, or "ALL" when it isn't one the filter offers. */
+function statusFilterFor(status: string | null): string {
+  if (status === RESCHEDULE_FILTER) return status;
+  return status && (DELIVERY_STATUSES as readonly string[]).includes(status) ? status : "ALL";
+}
+
+/** Pseudo-status: deliveries whose customer asked for another day (?status=RESCHEDULE_REQUESTED). */
+const RESCHEDULE_FILTER = "RESCHEDULE_REQUESTED";
+
 export function DeliveriesView() {
   // ── filters ───────────────────────────────────────────────
   // Every handler that changes a filter also resets pagination to page 1.
   const [searchInput, setSearchInput] = useState("");
   const [search, setSearch] = useState("");
-  // A one-shot preset (e.g. dashboard "Failed" KPI) seeds the status filter on mount.
-  const [statusFilter, setStatusFilter] = useState(() => useAppStore.getState().deliveriesStatusPreset ?? "ALL");
+  // The status filter is part of the address (?status=FAILED, e.g. from the dashboard
+  // "Failed" KPI). Back/Forward or goToDeliveries() while this view is open re-seed it.
+  const urlStatus = useAppStore((s) => s.deliveriesStatus);
+  const setUrlStatus = useAppStore((s) => s.setDeliveriesStatus);
+  const [statusFilter, setStatusFilter] = useState(() => statusFilterFor(urlStatus));
   const [priorityFilter, setPriorityFilter] = useState("ALL");
   const [fromDay, setFromDay] = useState("");
   const [toDay, setToDay] = useState("");
@@ -98,10 +110,22 @@ export function DeliveriesView() {
   const [importBatch, setImportBatch] = useState<{ id: string; fileName: string } | null>(null);
   const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  const [seenUrlStatus, setSeenUrlStatus] = useState(urlStatus);
+  if (urlStatus !== seenUrlStatus) {
+    setSeenUrlStatus(urlStatus);
+    setStatusFilter(statusFilterFor(urlStatus));
+    setPage(1);
+  }
+
+  /** Change the status filter and mirror it into the address. */
+  function applyStatus(v: string) {
+    const next = v === "ALL" ? null : v;
+    setStatusFilter(v);
+    setSeenUrlStatus(next);
+    setUrlStatus(next);
+  }
+
   useEffect(() => {
-    // Consume the preset so it doesn't re-apply on the next visit.
-    const { deliveriesStatusPreset, setDeliveriesStatusPreset } = useAppStore.getState();
-    if (deliveriesStatusPreset) setDeliveriesStatusPreset(null);
     return () => {
       if (searchTimer.current) clearTimeout(searchTimer.current);
     };
@@ -119,7 +143,7 @@ export function DeliveriesView() {
   }
 
   function handleStatusChange(v: string) {
-    setStatusFilter(v);
+    applyStatus(v);
     setPage(1);
   }
 
@@ -142,7 +166,7 @@ export function DeliveriesView() {
     if (searchTimer.current) clearTimeout(searchTimer.current);
     setSearchInput("");
     setSearch("");
-    setStatusFilter("ALL");
+    applyStatus("ALL");
     setPriorityFilter("ALL");
     setFromDay("");
     setToDay("");
@@ -157,7 +181,8 @@ export function DeliveriesView() {
   const params = new URLSearchParams();
   if (search) params.set("search", search);
   if (importBatch) params.set("importBatchId", importBatch.id);
-  if (statusFilter !== "ALL") params.set("status", statusFilter);
+  if (statusFilter === RESCHEDULE_FILTER) params.set("reschedule", "PENDING");
+  else if (statusFilter !== "ALL") params.set("status", statusFilter);
   if (priorityFilter !== "ALL") params.set("priority", priorityFilter);
   if (!rangeInverted) {
     const from = rangeFromParam(fromDay);
@@ -222,7 +247,7 @@ export function DeliveriesView() {
     setSearchInput("");
     setSearch("");
     setImportBatch(batch);
-    setStatusFilter("ALL");
+    applyStatus("ALL");
     setPriorityFilter("ALL");
     setFromDay("");
     setToDay("");
@@ -235,6 +260,16 @@ export function DeliveriesView() {
 
   return (
     <div className="space-y-4">
+      {data?.pendingReschedules && statusFilter !== RESCHEDULE_FILTER ? (
+        <button
+          type="button"
+          onClick={() => handleStatusChange(RESCHEDULE_FILTER)}
+          className="inline-flex min-h-11 items-center gap-2 rounded-full border border-amber-300 bg-amber-50 px-3.5 text-sm font-medium text-amber-900 transition-colors outline-none hover:bg-amber-100 focus-visible:ring-[3px] focus-visible:ring-ring/50 sm:min-h-9 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-200 dark:hover:bg-amber-950/70"
+        >
+          <CalendarClock className="size-4" aria-hidden="true" />
+          {data.pendingReschedules} reschedule {data.pendingReschedules === 1 ? "request" : "requests"} waiting
+        </button>
+      ) : null}
       {/* Toolbar */}
       <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-center">
         <div className="relative w-full sm:max-w-xs">
@@ -258,6 +293,7 @@ export function DeliveriesView() {
           </SelectTrigger>
           <SelectContent>
             <SelectItem value="ALL">All statuses</SelectItem>
+            <SelectItem value={RESCHEDULE_FILTER}>Reschedule requests</SelectItem>
             {DELIVERY_STATUSES.map((s) => (
               <SelectItem key={s} value={s}>
                 {STATUS_LABELS[s]}
@@ -436,6 +472,7 @@ export function DeliveriesView() {
                   <TableHead className="px-4">Priority</TableHead>
                   <TableHead className="px-4">Status</TableHead>
                   <TableHead className="px-4">Driver</TableHead>
+                  <TableHead className="px-4 text-right">Charge</TableHead>
                   <TableHead className="px-4">Expected</TableHead>
                   <TableHead className="px-4">Created</TableHead>
                 </TableRow>
@@ -474,6 +511,20 @@ export function DeliveriesView() {
                     </TableCell>
                     <TableCell className="px-4 py-3">
                       {d.assignment?.driverName ?? <span className="text-muted-foreground">—</span>}
+                      {d.assignment && d.routeSeq ? (
+                        <div className="text-xs tabular-nums text-muted-foreground">
+                          Stop {d.routeSeq}
+                          {d.plannedEta ? ` · ETA ${formatTime(d.plannedEta)}` : ""}
+                        </div>
+                      ) : null}
+                    </TableCell>
+                    <TableCell className="px-4 py-3 text-right tabular-nums">
+                      {d.charge?.deliveryFeeBdt != null ? (
+                        formatBdt(d.charge.deliveryFeeBdt)
+                      ) : (
+                        <span className="text-muted-foreground">—</span>
+                      )}
+                      {d.charge?.zoneName ? <div className="max-w-32 truncate text-xs text-muted-foreground">{d.charge.zoneName}</div> : null}
                     </TableCell>
                     <TableCell className="px-4 py-3">{friendlyDueDate(d.expectedAt)}</TableCell>
                     <TableCell className="px-4 py-3 text-muted-foreground">{formatDate(d.createdAt)}</TableCell>
@@ -482,7 +533,7 @@ export function DeliveriesView() {
                 {loading
                   ? Array.from({ length: 3 }).map((_, i) => (
                       <TableRow key={`skeleton-${i}`} className="hover:bg-transparent">
-                        <TableCell colSpan={7} className="px-4 py-3">
+                        <TableCell colSpan={8} className="px-4 py-3">
                           <Skeleton className="h-8 w-full" />
                         </TableCell>
                       </TableRow>
@@ -522,7 +573,10 @@ export function DeliveriesView() {
               <p className="font-medium">{d.recipientName}</p>
               <p className="text-sm text-muted-foreground">{truncate(d.deliveryAddress, 56)}</p>
               <div className="mt-1 flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
-                <span>{d.assignment?.driverName ?? "Unassigned"}</span>
+                <span>
+                  {d.assignment?.driverName ?? "Unassigned"}
+                  {d.assignment && d.routeSeq ? ` · Stop ${d.routeSeq}${d.plannedEta ? ` · ETA ${formatTime(d.plannedEta)}` : ""}` : ""}
+                </span>
                 <span>{friendlyDueDate(d.expectedAt)}</span>
               </div>
               <div className="mt-1">

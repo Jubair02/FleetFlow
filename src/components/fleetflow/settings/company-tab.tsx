@@ -39,19 +39,8 @@ import {
   errorProps,
   issuesByField,
 } from "./shared";
-
-/** Common zones for our customers; any other valid zone already saved is kept in the list. */
-const TIMEZONES = [
-  { value: "Asia/Dhaka", label: "Bangladesh — Asia/Dhaka (UTC+6)" },
-  { value: "Asia/Kolkata", label: "India — Asia/Kolkata (UTC+5:30)" },
-  { value: "Asia/Kathmandu", label: "Nepal — Asia/Kathmandu (UTC+5:45)" },
-  { value: "Asia/Karachi", label: "Pakistan — Asia/Karachi (UTC+5)" },
-  { value: "Asia/Dubai", label: "UAE — Asia/Dubai (UTC+4)" },
-  { value: "Asia/Singapore", label: "Singapore — Asia/Singapore (UTC+8)" },
-  { value: "Asia/Kuala_Lumpur", label: "Malaysia — Asia/Kuala_Lumpur (UTC+8)" },
-  { value: "Europe/London", label: "UK — Europe/London" },
-  { value: "UTC", label: "UTC" },
-];
+import { TIMEZONES, timezoneOptions } from "@/lib/timezone";
+import { DepotPinField } from "@/components/fleetflow/map/depot-pin-field";
 
 type OrgField = "name" | "phone" | "contactEmail" | "address" | "defaultPickupAddress" | "timezone";
 type OrgForm = Record<OrgField, string>;
@@ -181,7 +170,7 @@ function CompanyForm({ org }: { org: OrgSettings }) {
 
   const initial = toForm(org);
   const dirty = (Object.keys(initial) as OrgField[]).some((k) => form[k].trim() !== initial[k]);
-  const zones = TIMEZONES.some((t) => t.value === form.timezone) ? TIMEZONES : [{ value: form.timezone, label: form.timezone }, ...TIMEZONES];
+  const zones = timezoneOptions(form.timezone);
 
   const field = (key: OrgField) => (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
     const value = e.target.value;
@@ -297,6 +286,9 @@ function CompanyForm({ org }: { org: OrgSettings }) {
               <p id="org-pickup-hint" className="text-xs text-muted-foreground">
                 Prefilled as the pickup address when you create a delivery. You can still change it per order.
               </p>
+            </div>
+            <div className="sm:col-span-2">
+              <DepotPinField org={org} address={form.defaultPickupAddress} />
             </div>
           </SettingsSection>
 

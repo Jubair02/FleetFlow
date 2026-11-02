@@ -296,7 +296,7 @@ describe("Prisma outbox store", () => {
     expect(await store.claim("n1", "fresh", now)).toBe(true);
     expect(notification.updateMany.mock.calls[0][0]).toEqual({
       where: { id: "n1", channel: "EMAIL", status: "PENDING", attempts: { lt: MAX_ATTEMPTS } },
-      data: { status: "SENDING", attempts: { increment: 1 }, sentAt: now },
+      data: { status: "SENDING", attempts: { increment: 1 }, sentAt: now, lastAttemptAt: now },
     });
 
     notification.updateMany.mockResolvedValueOnce({ count: 0 });

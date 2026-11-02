@@ -37,6 +37,8 @@ function raw(over: Partial<Record<ImportColumn, string>> = {}): Record<ImportCol
     instructions: "",
     priority: "",
     expected_delivery: "",
+    weight_kg: "",
+    delivery_fee: "",
     ...over,
   };
 }
@@ -248,7 +250,7 @@ describe("buildImportPlan", () => {
   });
 
   it("warns about extra cells beyond the header", () => {
-    const plan = buildImportPlan(`${HEADER}\nA,Rahim Uddin,01711234567,,,House 1, Road 2,,,,extra\n`, OPTS);
+    const plan = buildImportPlan(`${HEADER}\nA,Rahim Uddin,01711234567,,,House 1, Road 2,,,,,,extra\n`, OPTS);
     expect(plan.rows[0].warnings.join(" ")).toMatch(/more cells than the header/);
   });
 
@@ -394,7 +396,7 @@ describe("totals and rows to fix", () => {
     expect(fix).toHaveLength(2);
     expect(fix[1][0]).toBe("C");
     expect(fix[1][2]).toBe("+880");
-    expect(fix[1][9]).toMatch(/^Row 4: .*at least 6.*Priority "soon"/);
+    expect(fix[1][IMPORT_COLUMNS.length]).toMatch(/^Row 4: .*at least 6.*Priority "soon"/);
 
     // The downloaded file re-imports with the same header (error column ignored).
     const again = buildImportPlan(toCsv(fix), OPTS);

@@ -1,12 +1,11 @@
 "use client";
 
 import type { ReactNode } from "react";
-import { format } from "date-fns";
 import { Building2, Sparkles, type LucideIcon } from "lucide-react";
 
 import { ENTER_MOTION } from "@/components/fleetflow/driver/job-utils";
 import { TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { initials } from "@/lib/format";
+import { formatZoned, initials } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import type { SettingsTab } from "@/store/app-store";
 
@@ -71,7 +70,7 @@ export function SettingsHero({
           </h2>
           <p className="mt-1 text-sm text-pretty text-white/90">
             Company profile, team access and your subscription
-            {since ? <span className="hidden sm:inline"> · with FleetFlow since {format(new Date(since), "MMMM yyyy")}</span> : null}
+            {since ? <span className="hidden sm:inline"> · with FleetFlow since {formatZoned(since, "MMMM yyyy")}</span> : null}
           </p>
         </div>
         {planName && (
@@ -81,7 +80,7 @@ export function SettingsHero({
         )}
       </div>
 
-      <TabsList aria-label="Settings sections" className="mt-5 grid h-auto w-full grid-cols-3 items-stretch gap-2 bg-transparent p-0 text-white sm:gap-3">
+      <TabsList aria-label="Settings sections" className="mt-5 grid h-auto w-full grid-cols-2 items-stretch gap-2 lg:grid-cols-3 bg-transparent p-0 text-white sm:gap-3">
         {items.map(({ value, label, icon: Icon, summary }) => (
           <TabsTrigger
             key={value}

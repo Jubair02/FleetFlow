@@ -4,6 +4,7 @@ import { useState } from "react";
 import { AlertTriangle, Check, ChevronLeft, ChevronRight, Copy, KeyRound, LoaderCircle, RotateCw, ShieldCheck, type LucideIcon } from "lucide-react";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
+import { formatBdt } from "@/lib/format";
 import type { BillingCycle } from "@/lib/plan-catalog";
 import type { OrgStatus, SubscriptionStatus } from "@/lib/platform-types";
 import { Badge } from "@/components/ui/badge";
@@ -36,9 +37,7 @@ export function fmtNum(n: number | null | undefined): string {
   return typeof n === "number" ? n.toLocaleString("en-US") : "—";
 }
 
-export function formatBdt(amount: number): string {
-  return `৳${amount.toLocaleString("en-US")}`;
-}
+export { formatBdt };
 
 export function shortId(id: string): string {
   return id.length > 10 ? `${id.slice(0, 8)}…` : id;
@@ -161,7 +160,7 @@ export function UserStatusBadge({ active }: { active: boolean }) {
 export function RoleBadge({ role }: { role: string }) {
   return (
     <Badge variant="outline" className="whitespace-nowrap font-medium text-muted-foreground">
-      {role === "ADMIN" ? "Admin" : role === "DRIVER" ? "Driver" : role}
+      {role === "ADMIN" ? "Admin" : role === "DISPATCHER" ? "Dispatcher" : role === "DRIVER" ? "Driver" : role}
     </Badge>
   );
 }

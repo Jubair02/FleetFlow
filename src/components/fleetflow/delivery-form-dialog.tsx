@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { toast } from "sonner";
-import { format, isValid } from "date-fns";
+import { isValid } from "date-fns";
 import { AlertTriangle, Loader2, Plus, Save } from "lucide-react";
 
 import { api, useApiData } from "@/lib/api-client";
@@ -29,6 +29,10 @@ import {
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
+import { displayTimezone } from "@/lib/format";
+import { instantToWallInput, wallTimeToInstant } from "@/lib/zoned";
+import { DeliveryPinSection, initialPin, pinFields } from "@/components/fleetflow/map/delivery-pin-section";
+import { chargeBody, chargeError, chargeInputFrom, DeliveryChargeFields, type ChargeInput } from "@/components/fleetflow/delivery-charge-fields";
 
 // ─────────────────────────────────────────────────────────────
 // Create / edit delivery dialog — mirrors createDeliverySchema
@@ -62,6 +66,8 @@ interface FormState {
   recipientEmail: string;
   priority: string;
   expectedAtLocal: string;
+  /** Cash to collect, whole taka as typed ("" = prepaid). */
+  codAmount: string;
 }
 
 type FieldKey = keyof FormState;
@@ -77,11 +83,18 @@ const EMPTY_FORM: FormState = {
   recipientEmail: "",
   priority: "NORMAL",
   expectedAtLocal: "",
+  codAmount: "",
 };
 
-/** Date → value for <input type="datetime-local"> (local time, minute precision). */
+/** "" or "0" → null (prepaid); otherwise whole taka. */
+function codValue(input: string): number | null {
+  const n = Number(input.trim());
+  return input.trim() && n > 0 ? n : null;
+}
+
+/** Date → value for <input type="datetime-local"> (company time, minute precision). */
 function toLocalInput(d: Date): string {
-  return format(d, "yyyy-MM-dd'T'HH:mm");
+  return instantToWallInput(d, displayTimezone());
 }
 
 function formFromDelivery(d: Delivery): FormState {
@@ -96,6 +109,7 @@ function formFromDelivery(d: Delivery): FormState {
     recipientEmail: d.recipientEmail ?? "",
     priority: d.priority,
     expectedAtLocal: expected && isValid(expected) ? toLocalInput(expected) : "",
+    codAmount: d.codAmount ? String(d.codAmount) : "",
   };
 }
 
@@ -125,13 +139,17 @@ function validate(form: FormState, checkExpected: boolean): FormErrors {
   if (form.externalRef.trim().length > LIMITS.externalRef.max) {
     errs.externalRef = `Order reference must be at most ${LIMITS.externalRef.max} characters.`;
   }
+  const cod = form.codAmount.trim();
+  if (cod && (!/^\d+$/.test(cod) || Number(cod) > 10_000_000)) {
+    errs.codAmount = "Enter the cash amount in whole taka (e.g. 1250).";
+  }
   const email = form.recipientEmail.trim();
   if (email && (email.length > LIMITS.recipientEmail.max || !EMAIL_RE.test(email))) {
     errs.recipientEmail = "Enter a valid customer email.";
   }
   if (checkExpected && form.expectedAtLocal) {
-    const d = new Date(form.expectedAtLocal);
-    if (!isValid(d)) errs.expectedAtLocal = "Enter a valid date and time.";
+    const d = wallTimeToInstant(form.expectedAtLocal, displayTimezone());
+    if (!d) errs.expectedAtLocal = "Enter a valid date and time.";
     else if (d.getTime() < Date.now()) errs.expectedAtLocal = "Expected delivery must be in the future.";
   }
   for (const k of Object.keys(errs) as FieldKey[]) if (!errs[k]) delete errs[k];
@@ -140,8 +158,8 @@ function validate(form: FormState, checkExpected: boolean): FormErrors {
 
 function expectedIso(local: string): string | null {
   if (!local) return null;
-  const d = new Date(local);
-  return isValid(d) ? d.toISOString() : null;
+  // The input holds company wall-clock time, whatever the viewer's browser timezone is.
+  return wallTimeToInstant(local, displayTimezone())?.toISOString() ?? null;
 }
 
 function FieldError({ id, message }: { id: string; message?: string }) {
@@ -215,6 +233,12 @@ function DeliveryForm({
   const [errors, setErrors] = useState<FormErrors>({});
   const [serverError, setServerError] = useState<string | null>(null);
   const [minExpected] = useState(() => toLocalInput(new Date()));
+  // optional map pin (docs/MAPS.md)
+  const [pin, setPin] = useState(() => initialPin(delivery));
+  // weight / zone / delivery charge (docs/ZONES.md)
+  const [initialCharge] = useState<ChargeInput | null>(() => (delivery ? chargeInputFrom(delivery) : null));
+  const [charge, setCharge] = useState<ChargeInput>(() => chargeInputFrom(delivery));
+  const [chargeErr, setChargeErr] = useState<string | undefined>(undefined);
 
   // New deliveries: prefill the pickup address from the organization default
   // once it loads, unless the user already typed one.
@@ -260,7 +284,10 @@ function DeliveryForm({
       if (form[k].trim() !== initial[k].trim()) body[k] = form[k].trim();
     }
     if (form.priority !== initial.priority) body.priority = form.priority;
+    if (form.codAmount.trim() !== initial.codAmount.trim()) body.codAmount = codValue(form.codAmount);
     if (form.expectedAtLocal !== initial.expectedAtLocal) body.expectedAt = expectedIso(form.expectedAtLocal);
+    Object.assign(body, chargeBody(charge, initialCharge));
+    Object.assign(body, pinFields(pin, initialPin(delivery)));
     return body;
   }
 
@@ -271,7 +298,9 @@ function DeliveryForm({
     const checkExpected = !editing || form.expectedAtLocal !== initial.expectedAtLocal;
     const errs = validate(form, checkExpected);
     setErrors(errs);
-    if (Object.keys(errs).length > 0) return;
+    const cErr = chargeError(charge);
+    setChargeErr(cErr);
+    if (Object.keys(errs).length > 0 || cErr) return;
 
     if (delivery) {
       const body = changedFields();
@@ -306,6 +335,9 @@ function DeliveryForm({
         recipientEmail: form.recipientEmail.trim() || undefined,
         priority: form.priority,
         expectedAt: expectedIso(form.expectedAtLocal),
+        codAmount: codValue(form.codAmount),
+        ...chargeBody(charge, null),
+        ...pinFields(pin, null),
       });
       toast.success(`Delivery created — tracking code ${res.delivery.trackingCode}`);
       onDone();
@@ -401,6 +433,47 @@ function DeliveryForm({
         />
         <FieldError id={`${idPrefix}-deliveryAddress-error`} message={errors.deliveryAddress} />
       </div>
+
+      <DeliveryPinSection value={pin} onChange={setPin} address={form.deliveryAddress} source={delivery?.location?.source} />
+
+      <div className="space-y-2">
+        <Label htmlFor={`${idPrefix}-cod`}>Cash on delivery (optional)</Label>
+        <div className="relative">
+          <span className="pointer-events-none absolute top-1/2 left-3 -translate-y-1/2 text-sm text-muted-foreground" aria-hidden="true">
+            ৳
+          </span>
+          <Input
+            id={`${idPrefix}-cod`}
+            inputMode="numeric"
+            value={form.codAmount}
+            onChange={(e) => setField("codAmount", e.target.value.replace(/\D/g, ""))}
+            aria-invalid={!!errors.codAmount}
+            aria-describedby={`${idPrefix}-cod-hint${errors.codAmount ? ` ${idPrefix}-codAmount-error` : ""}`}
+            placeholder="0"
+            autoComplete="off"
+            className={cn("min-h-11 pl-7 sm:min-h-9", errors.codAmount && errorClass)}
+          />
+        </div>
+        <p id={`${idPrefix}-cod-hint`} className="text-xs text-muted-foreground">
+          Amount the driver collects from the recipient, in whole taka. Leave empty if prepaid.
+        </p>
+        <FieldError id={`${idPrefix}-codAmount-error`} message={errors.codAmount} />
+      </div>
+
+      <DeliveryChargeFields
+        idPrefix={idPrefix}
+        value={charge}
+        onChange={(next) => {
+          setCharge(next);
+          setChargeErr(undefined);
+          setServerError(null);
+        }}
+        address={form.deliveryAddress}
+        codAmount={codValue(form.codAmount)}
+        initial={initialCharge}
+        addressChanged={form.deliveryAddress.trim() !== initial.deliveryAddress.trim()}
+        error={chargeErr}
+      />
 
       <div className="grid gap-4 sm:grid-cols-2">
         <div className="space-y-2">

@@ -21,7 +21,10 @@ export const metadata: Metadata = {
   keywords: ["FleetFlow", "fleet management", "delivery management", "dispatch", "logistics", "proof of delivery"],
   icons: {
     icon: "/favicon.svg",
+    apple: "/icons/apple-touch-icon.png",
   },
+  // Installed (home-screen) mode — see src/app/manifest.ts.
+  appleWebApp: { capable: true, title: "FleetFlow", statusBarStyle: "default" },
 };
 
 export const viewport: Viewport = {

@@ -3,13 +3,20 @@ import { createHash, randomBytes, scrypt as scryptCb, timingSafeEqual } from "cr
 import { promisify } from "util";
 import { db } from "@/lib/db";
 import type { DriverProfile, Organization, User } from "@prisma/client";
+import { COMPANY_SESSION_TTL_MS, companyIdleTimeoutMs, isIdleExpired, needsTouch } from "@/lib/session-policy";
 
 export const SESSION_COOKIE = "ff_session";
-const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+
+/** Organization fields every session carries (status gates access; the rest drives subscription banners). */
+export const SESSION_ORG_SELECT = {
+  id: true, name: true, timezone: true, status: true, subscriptionStatus: true, trialEndsAt: true, paidUntil: true,
+} as const;
+
+export type SessionOrg = Pick<Organization, "id" | "name" | "timezone" | "status" | "subscriptionStatus" | "trialEndsAt" | "paidUntil">;
 
 export type SessionUser = User & {
   driverProfile: DriverProfile | null;
-  organization: Pick<Organization, "id" | "name" | "status">;
+  organization: SessionOrg;
 };
 
 // ── Password hashing (scrypt, no external deps) ──────────────
@@ -47,9 +54,10 @@ function hashToken(token: string): string {
 
 export async function createSession(userId: string): Promise<void> {
   const token = randomBytes(32).toString("hex");
-  const expiresAt = new Date(Date.now() + SESSION_TTL_MS);
-  await db.session.deleteMany({ where: { userId, expiresAt: { lt: new Date() } } });
-  await db.session.create({ data: { token: hashToken(token), userId, expiresAt } });
+  const now = new Date();
+  const expiresAt = new Date(now.getTime() + COMPANY_SESSION_TTL_MS);
+  await db.session.deleteMany({ where: { userId, expiresAt: { lt: now } } });
+  await db.session.create({ data: { token: hashToken(token), userId, expiresAt, lastSeenAt: now } });
   const cookieStore = await cookies();
   cookieStore.set(SESSION_COOKIE, token, {
     httpOnly: true,
@@ -69,28 +77,49 @@ export async function destroySession(): Promise<void> {
   cookieStore.delete(SESSION_COOKIE);
 }
 
-export async function getSessionUser(): Promise<SessionUser | null> {
+/** Why there is no signed-in user: "idle" lets the 401 say the session timed out. */
+export type SessionState = { user: SessionUser; ended?: undefined } | { user: null; ended?: "idle" };
+
+/**
+ * Resolve the company session from the cookie, enforcing the absolute expiry
+ * and the role's idle timeout (src/lib/session-policy.ts). An expired or idle
+ * session is deleted. lastSeenAt is refreshed at most once a minute.
+ */
+export async function getSessionState(): Promise<SessionState> {
   const cookieStore = await cookies();
   const token = cookieStore.get(SESSION_COOKIE)?.value;
-  if (!token) return null;
+  if (!token) return { user: null };
   const session = await db.session.findUnique({
     where: { token: hashToken(token) },
     include: {
       user: {
         include: {
           driverProfile: true,
-          organization: { select: { id: true, name: true, status: true } },
+          organization: { select: SESSION_ORG_SELECT },
         },
       },
     },
   });
-  if (!session) return null;
-  if (session.expiresAt < new Date()) {
+  if (!session) return { user: null };
+  const now = new Date();
+  if (session.expiresAt < now) {
     await db.session.delete({ where: { id: session.id } }).catch(() => {});
-    return null;
+    return { user: null };
   }
-  if (!session.user.active) return null;
+  if (isIdleExpired(session.lastSeenAt, now, companyIdleTimeoutMs(session.user.role))) {
+    await db.session.delete({ where: { id: session.id } }).catch(() => {});
+    return { user: null, ended: "idle" };
+  }
+  if (!session.user.active) return { user: null };
   // A suspended company's staff and drivers lose API access immediately (data is kept).
-  if (session.user.organization.status !== "ACTIVE") return null;
-  return session.user;
+  if (session.user.organization.status !== "ACTIVE") return { user: null };
+  if (needsTouch(session.lastSeenAt, now)) {
+    // Throttled activity stamp; a failed write must never fail the request.
+    await db.session.updateMany({ where: { id: session.id }, data: { lastSeenAt: now } }).catch(() => {});
+  }
+  return { user: session.user };
+}
+
+export async function getSessionUser(): Promise<SessionUser | null> {
+  return (await getSessionState()).user;
 }

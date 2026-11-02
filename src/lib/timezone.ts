@@ -6,6 +6,24 @@
 
 export const DEFAULT_TIMEZONE = "Asia/Dhaka";
 
+/** Common zones for FleetFlow customers (company settings and the platform console). */
+export const TIMEZONES = [
+  { value: "Asia/Dhaka", label: "Bangladesh — Asia/Dhaka (UTC+6)" },
+  { value: "Asia/Kolkata", label: "India — Asia/Kolkata (UTC+5:30)" },
+  { value: "Asia/Kathmandu", label: "Nepal — Asia/Kathmandu (UTC+5:45)" },
+  { value: "Asia/Karachi", label: "Pakistan — Asia/Karachi (UTC+5)" },
+  { value: "Asia/Dubai", label: "UAE — Asia/Dubai (UTC+4)" },
+  { value: "Asia/Singapore", label: "Singapore — Asia/Singapore (UTC+8)" },
+  { value: "Asia/Kuala_Lumpur", label: "Malaysia — Asia/Kuala_Lumpur (UTC+8)" },
+  { value: "Europe/London", label: "UK — Europe/London" },
+  { value: "UTC", label: "UTC" },
+];
+
+/** The list above, plus the organization's current zone when it isn't in it. */
+export function timezoneOptions(current: string): { value: string; label: string }[] {
+  return TIMEZONES.some((t) => t.value === current) ? TIMEZONES : [{ value: current, label: current }, ...TIMEZONES];
+}
+
 export function isValidTimezone(tz: string): boolean {
   try {
     new Intl.DateTimeFormat("en-US", { timeZone: tz });
@@ -49,4 +67,10 @@ export function zonedTimeToUtc(year: number, month: number, day: number, hour: n
 export function startOfMonthInTz(now: Date, tz: string): Date {
   const local = new Date(now.getTime() + tzOffsetMinutes(now, tz) * 60_000);
   return zonedTimeToUtc(local.getUTCFullYear(), local.getUTCMonth() + 1, 1, 0, 0, tz);
+}
+
+/** Midnight (start of today) in the given timezone, as a UTC instant. */
+export function startOfDayInTz(now: Date, tz: string): Date {
+  const local = new Date(now.getTime() + tzOffsetMinutes(now, tz) * 60_000);
+  return zonedTimeToUtc(local.getUTCFullYear(), local.getUTCMonth() + 1, local.getUTCDate(), 0, 0, tz);
 }

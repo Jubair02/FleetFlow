@@ -41,9 +41,9 @@ export function hasPublicAppUrl(): boolean {
   return !!(process.env.APP_URL?.trim() || process.env.VERCEL_PROJECT_PRODUCTION_URL?.trim());
 }
 
-/** Public tracking page for a delivery (`/?track=<token>`). */
+/** Public tracking page for a delivery (`/track/<token>`). */
 export function trackingUrl(token: string, appUrl?: string): string {
-  return `${appBaseUrl(appUrl)}/?track=${encodeURIComponent(token)}`;
+  return `${appBaseUrl(appUrl)}/track/${encodeURIComponent(token)}`;
 }
 
 const URL_RE = /https?:\/\/[^\s<>"']+/g;
@@ -117,6 +117,107 @@ export function customerFailedEmail(input: CustomerEmailInput): EmailContent {
       `We tried to deliver ${input.trackingCode} from ${input.companyName}, but the attempt was unsuccessful.`,
       `${input.companyName} will contact you to arrange the next step.`,
       `— ${senderName(input.companyName)}`,
+    ].join("\n\n"),
+  };
+}
+
+/** Answer to a reschedule request made on the tracking page. `when` is preformatted in the company's timezone. */
+export function customerRescheduleEmail(
+  input: CustomerEmailInput & { accepted: boolean; when: string; message: string | null; trackingUrl: string }
+): EmailContent {
+  return {
+    subject: input.accepted
+      ? `New delivery day confirmed for ${input.trackingCode}`
+      : `About your reschedule request for ${input.trackingCode}`,
+    text: [
+      greeting(input.recipientName),
+      input.accepted
+        ? `${input.companyName} confirmed your new delivery time for ${input.trackingCode}: ${input.when}.`
+        : `${input.companyName} couldn't move ${input.trackingCode} to ${input.when}.`,
+      ...(input.message ? [`Message from ${input.companyName}: ${input.message}`] : []),
+      input.accepted ? `Follow your delivery here:\n${input.trackingUrl}` : `See the latest on your delivery, or ask for another day, here:\n${input.trackingUrl}`,
+      `— ${senderName(input.companyName)}`,
+    ].join("\n\n"),
+  };
+}
+
+// ── billing emails (FleetFlow → company admins / FleetFlow staff) ──
+
+export interface InvoiceEmailInput {
+  companyName: string;
+  invoiceNumber: string;
+  planName: string;
+  /** preformatted, e.g. "৳4,000" */
+  amount: string;
+  /** preformatted, e.g. "1 Nov 2026 – 1 Dec 2026" */
+  period: string;
+  /** preformatted due date */
+  dueDate: string;
+}
+
+/** To company admins when an invoice is issued (renewal, manual or requested). */
+export function invoiceIssuedEmail(input: InvoiceEmailInput & { howToPay: string[] }): EmailContent {
+  return {
+    subject: `Invoice ${input.invoiceNumber} — ${input.amount} due ${input.dueDate}`,
+    text: [
+      "Hello,",
+      `FleetFlow has issued invoice ${input.invoiceNumber} to ${input.companyName} for the ${input.planName} plan (${input.period}).`,
+      `Amount: ${input.amount}\nDue: ${input.dueDate}`,
+      input.howToPay.length ? `How to pay:\n${input.howToPay.join("\n")}` : "",
+      `After paying, open Settings → Plan & billing and choose "I've paid" so we can confirm it:\n${appBaseUrl()}/`,
+      "— FleetFlow billing",
+    ]
+      .filter(Boolean)
+      .join("\n\n"),
+  };
+}
+
+/** To FleetFlow staff (BILLING_NOTIFY_EMAIL) when a company reports a payment. */
+export function invoicePaymentReportedEmail(
+  input: Pick<InvoiceEmailInput, "companyName" | "invoiceNumber" | "amount"> & { method: string; reference: string | null; reportedBy: string }
+): EmailContent {
+  return {
+    subject: `Payment reported: ${input.invoiceNumber} (${input.companyName})`,
+    text: [
+      `${input.reportedBy} at ${input.companyName} reports paying invoice ${input.invoiceNumber} (${input.amount}).`,
+      `Method: ${input.method}\nReference: ${input.reference ?? "—"}`,
+      `Verify it and mark the invoice paid in the platform console (Overview → Payments to verify):\n${appBaseUrl()}/platform`,
+    ].join("\n\n"),
+  };
+}
+
+/** To company admins when FleetFlow confirms a payment. */
+export function invoicePaidEmail(
+  input: Pick<InvoiceEmailInput, "companyName" | "invoiceNumber" | "amount" | "planName"> & { paidUntil: string }
+): EmailContent {
+  return {
+    subject: `Payment received — ${input.invoiceNumber}`,
+    text: [
+      "Hello,",
+      `Thank you — we've received ${input.amount} for invoice ${input.invoiceNumber}.`,
+      `${input.companyName} is on the ${input.planName} plan, paid until ${input.paidUntil}.`,
+      "— FleetFlow billing",
+    ].join("\n\n"),
+  };
+}
+
+// ── account emails (forgot password) ────────────────────────
+
+/** Public reset page for a "forgot password" token (`/reset-password?token=…`). */
+export function passwordResetUrl(token: string, appUrl?: string): string {
+  return `${appBaseUrl(appUrl)}/reset-password?token=${encodeURIComponent(token)}`;
+}
+
+/** Self-service password reset link for a company user (admin, dispatcher or driver). */
+export function passwordResetEmail(input: { name: string; resetUrl: string; expiresInMinutes: number }): EmailContent {
+  return {
+    subject: "Reset your FleetFlow password",
+    text: [
+      greeting(input.name),
+      "We received a request to reset the password for your FleetFlow account.",
+      `Choose a new password here (the link works once and expires in ${input.expiresInMinutes} minutes):\n${input.resetUrl}`,
+      "If you didn't ask for this, you can ignore this email — your password stays the same and nobody can change it without this link.",
+      "— FleetFlow",
     ].join("\n\n"),
   };
 }

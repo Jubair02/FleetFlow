@@ -8,6 +8,7 @@
 //   E2E_BASE_URL=http://localhost:3001 E2E_DATABASE_URL="<disposable db url>" \
 //     node tests/e2e/plans.e2e.mjs
 import { execFileSync } from "child_process";
+import { completePlatformMfa } from "./mfa.mjs";
 
 const BASE = process.env.E2E_BASE_URL;
 const DB_URL = process.env.E2E_DATABASE_URL;
@@ -70,7 +71,8 @@ async function main() {
     env: { ...process.env, DATABASE_URL: DB_URL, SUPER_ADMIN_PASSWORD: superPassword }, encoding: "utf8",
   });
   const ops = new Client();
-  await ops.post("/api/platform/auth/login", { email: superEmail, password: superPassword });
+  const opsLogin = await ops.post("/api/platform/auth/login", { email: superEmail, password: superPassword });
+  await completePlatformMfa(ops, superEmail, opsLogin.data);
   const swift = new Client();
   await swift.post("/api/auth/login", { email: "admin@fleetflow.test", password: "Admin123!" });
   const anon = new Client();

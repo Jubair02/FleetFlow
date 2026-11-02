@@ -1,5 +1,5 @@
 import { db } from "@/lib/db";
-import { fail, requireAdmin } from "@/lib/api-helpers";
+import { fail, requireStaff } from "@/lib/api-helpers";
 import { assertFeature } from "@/lib/plans";
 import { toCsv } from "@/lib/csv";
 import { TEMPLATE_FILE_NAME, TEMPLATE_ROWS } from "@/lib/delivery-import";
@@ -8,7 +8,7 @@ import { TEMPLATE_FILE_NAME, TEMPLATE_ROWS } from "@/lib/delivery-import";
 // UTF-8 with a BOM so Excel opens Bangla text correctly. Requires csv_import.
 export async function GET() {
   try {
-    const user = await requireAdmin();
+    const user = await requireStaff();
     await assertFeature(db, user.organizationId, "csv_import");
     return new Response("﻿" + toCsv(TEMPLATE_ROWS), {
       headers: {

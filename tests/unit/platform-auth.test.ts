@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 // No DB and no request context: mock Prisma and the Next.js cookie store.
 const db = vi.hoisted(() => ({
-  platformSession: { findUnique: vi.fn(), delete: vi.fn() },
+  platformSession: { findUnique: vi.fn(), delete: vi.fn(), updateMany: vi.fn(async () => ({ count: 1 })) },
 }));
 vi.mock("@/lib/db", () => ({ db }));
 
@@ -17,7 +17,7 @@ vi.mock("next/headers", () => ({
 }));
 
 import { ApiError } from "@/lib/api-helpers";
-import { PLATFORM_COOKIE, platformAuditData, requirePlatformAdmin, sanitizeDetail } from "@/lib/platform-auth";
+import { PLATFORM_COOKIE, PLATFORM_IDLE_MESSAGE, getPlatformAdmin, platformAuditData, requirePlatformAdmin, sanitizeDetail } from "@/lib/platform-auth";
 
 const sha = (t: string) => createHash("sha256").update(t).digest("hex");
 const future = () => new Date(Date.now() + 60_000);
@@ -111,6 +111,50 @@ describe("requirePlatformAdmin", () => {
   it("active admin with a valid session is returned", async () => {
     jar.set(PLATFORM_COOKIE, "abc");
     db.platformSession.findUnique.mockResolvedValue({ id: "s", expiresAt: future(), admin: admin() });
+    await expect(requirePlatformAdmin()).resolves.toMatchObject({ id: "pa1" });
+  });
+
+  it("a session still waiting for its authenticator code (mfaPending) is NOT signed in", async () => {
+    jar.set(PLATFORM_COOKIE, "abc");
+    db.platformSession.findUnique.mockResolvedValue({ id: "s", expiresAt: future(), mfaPending: true, lastSeenAt: new Date(), admin: admin() });
+    expect(await status(requirePlatformAdmin())).toBe(401);
+    expect(await status(requirePlatformAdmin({ allowPasswordChangePending: true }))).toBe(401);
+    expect(await getPlatformAdmin()).toBeNull();
+    // only the two-factor endpoints (and logout) opt in
+    await expect(requirePlatformAdmin({ allowMfaPending: true })).resolves.toMatchObject({ id: "pa1" });
+    expect(db.platformSession.updateMany).not.toHaveBeenCalled(); // pending sessions aren't activity-stamped
+  });
+});
+
+describe("platform idle timeout (30 minutes)", () => {
+  const minutesAgo = (m: number) => new Date(Date.now() - m * 60_000);
+
+  it("31 minutes without a request → 401 with the inactivity message, session deleted", async () => {
+    jar.set(PLATFORM_COOKIE, "abc");
+    db.platformSession.findUnique.mockResolvedValue({ id: "s9", expiresAt: future(), mfaPending: false, lastSeenAt: minutesAgo(31), admin: admin() });
+    db.platformSession.delete.mockResolvedValue({});
+    await expect(requirePlatformAdmin()).rejects.toMatchObject({ status: 401, message: PLATFORM_IDLE_MESSAGE });
+    expect(db.platformSession.delete).toHaveBeenCalledWith({ where: { id: "s9" } });
+  });
+
+  it("29 minutes idle → still signed in, and lastSeenAt is refreshed", async () => {
+    jar.set(PLATFORM_COOKIE, "abc");
+    db.platformSession.findUnique.mockResolvedValue({ id: "s", expiresAt: future(), mfaPending: false, lastSeenAt: minutesAgo(29), admin: admin() });
+    await expect(requirePlatformAdmin()).resolves.toMatchObject({ id: "pa1" });
+    expect(db.platformSession.updateMany).toHaveBeenCalledWith({ where: { id: "s" }, data: { lastSeenAt: expect.any(Date) } });
+  });
+
+  it("lastSeenAt is written at most once a minute", async () => {
+    jar.set(PLATFORM_COOKIE, "abc");
+    db.platformSession.findUnique.mockResolvedValue({ id: "s", expiresAt: future(), mfaPending: false, lastSeenAt: new Date(Date.now() - 20_000), admin: admin() });
+    await expect(requirePlatformAdmin()).resolves.toMatchObject({ id: "pa1" });
+    expect(db.platformSession.updateMany).not.toHaveBeenCalled();
+  });
+
+  it("a failed activity write never fails the request", async () => {
+    jar.set(PLATFORM_COOKIE, "abc");
+    db.platformSession.findUnique.mockResolvedValue({ id: "s", expiresAt: future(), mfaPending: false, lastSeenAt: minutesAgo(5), admin: admin() });
+    db.platformSession.updateMany.mockRejectedValueOnce(new Error("db down"));
     await expect(requirePlatformAdmin()).resolves.toMatchObject({ id: "pa1" });
   });
 });

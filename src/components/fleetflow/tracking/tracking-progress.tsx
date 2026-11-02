@@ -2,8 +2,8 @@
 
 import { AlertCircle, Check } from "lucide-react";
 import { cn } from "@/lib/utils";
-import type { TrackingData } from "@/lib/types";
-import { computeSteps, stepTime, type StepState } from "./tracking-model";
+import type { TrackingData } from "@/lib/tracking";
+import { computeSteps, statusHeadline, stepTime, type StepState, type TrackingFormat } from "./tracking-model";
 import { ENTER, Surface } from "./tracking-ui";
 
 /** Connector colour leading INTO a step. */
@@ -14,7 +14,7 @@ function connector(step: StepState): string {
   return "bg-emerald-500";
 }
 
-function StepDot({ step, index }: { step: StepState; index: number }) {
+function StepDot({ step, index, f }: { step: StepState; index: number; f: TrackingFormat }) {
   return (
     <span
       className={cn(
@@ -41,20 +41,20 @@ function StepDot({ step, index }: { step: StepState; index: number }) {
       ) : step.reached ? (
         <Check className="size-4" strokeWidth={2.5} />
       ) : (
-        index + 1
+        f.number(index + 1)
       )}
     </span>
   );
 }
 
-function srState(step: StepState): string {
-  if (step.failed) return "attempt unsuccessful";
-  if (step.current) return "current step";
-  if (step.reached) return "completed";
-  return "not yet";
+function srState(step: StepState, f: TrackingFormat): string {
+  if (step.failed) return f.t.srStepFailed;
+  if (step.current) return f.t.srStepCurrent;
+  if (step.reached) return f.t.srStepDone;
+  return f.t.srStepPending;
 }
 
-export function TrackingProgress({ data, now }: { data: TrackingData; now: number }) {
+export function TrackingProgress({ data, now, f }: { data: TrackingData; now: number; f: TrackingFormat }) {
   const steps = computeSteps(data);
   const last = steps.length - 1;
   const reachedCount = steps.filter((s) => s.reached).length;
@@ -63,10 +63,10 @@ export function TrackingProgress({ data, now }: { data: TrackingData; now: numbe
     <Surface aria-labelledby="tracking-progress" className={cn("p-5 sm:p-6", ENTER)}>
       <div className="flex items-baseline justify-between gap-3">
         <h2 id="tracking-progress" className="text-sm font-semibold">
-          Delivery progress
+          {f.t.progressHeading}
         </h2>
         <span className="text-xs text-muted-foreground tabular-nums">
-          {data.status === "CANCELLED" ? "Cancelled" : `${reachedCount} of ${steps.length}`}
+          {data.status === "CANCELLED" ? f.t.cancelledShort : f.t.progressCount(f.number(reachedCount), f.number(steps.length))}
         </span>
       </div>
 
@@ -75,18 +75,18 @@ export function TrackingProgress({ data, now }: { data: TrackingData; now: numbe
         {steps.map((step, i) => (
           <li key={step.status} className="flex gap-3.5" aria-current={step.current ? "step" : undefined}>
             <div className="flex flex-col items-center">
-              <StepDot step={step} index={i} />
+              <StepDot step={step} index={i} f={f} />
               {i < last ? <span className={cn("my-1 min-h-5 w-0.5 flex-1 rounded-full", connector(steps[i + 1]))} aria-hidden="true" /> : null}
             </div>
             <div className={cn("min-w-0 pt-1.5", i < last && "pb-4")}>
               <p className={cn("text-sm leading-5", step.reached ? "font-medium text-foreground" : "text-muted-foreground", step.current && "font-semibold")}>
-                {step.label}
-                <span className="sr-only">, {srState(step)}</span>
+                {statusHeadline(step.status, f)}
+                <span className="sr-only">, {srState(step, f)}</span>
               </p>
-              {step.failed ? <p className="text-xs font-medium text-amber-700 dark:text-amber-400">Attempt unsuccessful</p> : null}
+              {step.failed ? <p className="text-xs font-medium text-amber-700 dark:text-amber-400">{f.t.attemptUnsuccessful}</p> : null}
               {step.at ? (
                 <p className="mt-0.5 text-xs text-muted-foreground tabular-nums">
-                  <time dateTime={step.at}>{stepTime(step.at, now)}</time>
+                  <time dateTime={step.at} suppressHydrationWarning>{stepTime(step.at, now, f)}</time>
                 </p>
               ) : null}
             </div>
@@ -102,7 +102,7 @@ export function TrackingProgress({ data, now }: { data: TrackingData; now: numbe
             {i < last ? (
               <span className={cn("absolute top-4 right-0 left-1/2 h-0.5 -translate-y-1/2", connector(steps[i + 1]))} aria-hidden="true" />
             ) : null}
-            <StepDot step={step} index={i} />
+            <StepDot step={step} index={i} f={f} />
             <p
               className={cn(
                 "mt-2.5 text-xs leading-tight text-balance md:text-[13px]",
@@ -110,13 +110,13 @@ export function TrackingProgress({ data, now }: { data: TrackingData; now: numbe
                 step.current && "font-semibold",
               )}
             >
-              {step.label}
-              <span className="sr-only">, {srState(step)}</span>
+              {statusHeadline(step.status, f)}
+              <span className="sr-only">, {srState(step, f)}</span>
             </p>
-            {step.failed ? <p className="mt-0.5 text-[11px] leading-tight font-medium text-amber-700 dark:text-amber-400">Attempt unsuccessful</p> : null}
+            {step.failed ? <p className="mt-0.5 text-[11px] leading-tight font-medium text-amber-700 dark:text-amber-400">{f.t.attemptUnsuccessful}</p> : null}
             {step.at ? (
               <p className="mt-1 text-[11px] leading-tight text-muted-foreground tabular-nums">
-                <time dateTime={step.at}>{stepTime(step.at, now)}</time>
+                <time dateTime={step.at} suppressHydrationWarning>{stepTime(step.at, now, f)}</time>
               </p>
             ) : null}
           </li>

@@ -1,13 +1,26 @@
 import { db } from "@/lib/db";
 import { getEmailProvider } from "@/lib/email";
-import { createPrismaOutboxStore, queueAndSend, retryEmails } from "@/lib/email/outbox";
+import {
+  createPrismaOutboxStore,
+  dispatchEmail,
+  emailLane,
+  findDueRows,
+  queueAndSend,
+  retryDueOutbox,
+  retryOutbox,
+} from "@/lib/email/outbox";
 import type { FeatureKey } from "@/lib/plan-catalog";
 import { customerDeliveredEmail, customerFailedEmail, customerTrackingEmail, trackingUrl } from "@/lib/email/templates";
+import { getSmsProvider } from "@/lib/sms";
+import { createPrismaSmsOutboxStore, dispatchSms, queueAndSendSms, smsLane } from "@/lib/sms/outbox";
+import { normalizeBdPhone } from "@/lib/sms/phone";
+import { customerDeliveredSms, customerFailedSms, customerTrackingSms } from "@/lib/sms/templates";
 
 // ─────────────────────────────────────────────────────────────
-// Notifications (in-app + email outbox) & Audit trail
-// Email rows go through the outbox state machine in src/lib/email/outbox.ts
-// and are sent by the provider chosen in src/lib/email/index.ts.
+// Notifications (in-app + email/SMS outbox) & Audit trail
+// Email and SMS rows go through the outbox state machine in
+// src/lib/email/outbox.ts and are sent by the providers chosen in
+// src/lib/email/index.ts and src/lib/sms/index.ts.
 // ─────────────────────────────────────────────────────────────
 
 interface NotifyInput {
@@ -68,9 +81,54 @@ export async function notifyEmail(input: NotifyEmailInput) {
   });
 }
 
-/** Re-dispatch an organization's FAILED / stale rows (see retryEmails). */
-export function retryOrganizationEmails(organizationId: string, ids?: string[]) {
-  return retryEmails(outbox, getEmailProvider(), organizationId, { ids });
+const smsOutbox = createPrismaSmsOutboxStore(db);
+
+export interface NotifySmsInput {
+  organizationId: string;
+  userId?: string | null;
+  /** canonical 8801XXXXXXXXX (normalizeBdPhone) */
+  recipientPhone: string;
+  type: string;
+  /** outbox label shown to admins (not texted) */
+  title: string;
+  /** the text message */
+  body: string;
+  deliveryId?: string | null;
+  dedupeKey?: string | null;
+}
+
+/** Queue an SMS and send it right away — same contract as notifyEmail. */
+export async function notifySms(input: NotifySmsInput) {
+  return queueAndSendSms(smsOutbox, getSmsProvider(), {
+    organizationId: input.organizationId,
+    userId: input.userId ?? null,
+    deliveryId: input.deliveryId ?? null,
+    type: input.type,
+    recipientPhone: input.recipientPhone,
+    title: input.title,
+    text: input.body,
+    dedupeKey: input.dedupeKey ?? null,
+  });
+}
+
+/** Re-dispatch an organization's FAILED / stale email and SMS rows (see retryOutbox). */
+export function retryOrganizationOutbox(organizationId: string, ids?: string[]) {
+  return retryOutbox([emailLane(outbox, getEmailProvider()), smsLane(smsOutbox, getSmsProvider())], organizationId, { ids });
+}
+
+/**
+ * Automatic retry for every organization (GET /api/cron/outbox): FAILED rows
+ * past their backoff and stale PENDING/SENDING rows, bounded per run.
+ */
+export function retryDueNotifications(opts: { now?: Date; limit?: number } = {}) {
+  return retryDueOutbox(
+    (now, limit) => findDueRows(db, now, limit),
+    {
+      EMAIL: (id, now) => dispatchEmail(outbox, getEmailProvider(), id, "retry", now),
+      SMS: (id, now) => dispatchSms(smsOutbox, getSmsProvider(), id, "retry", now),
+    },
+    opts
+  );
 }
 
 /**
@@ -85,7 +143,7 @@ export async function notifyAdmins(
   opts: { email?: boolean; emailDedupeKey?: string } = {}
 ) {
   const admins = await db.user.findMany({
-    where: { organizationId, role: "ADMIN", active: true },
+    where: { organizationId, role: { in: ["ADMIN", "DISPATCHER"] }, active: true },
     select: { id: true, email: true },
   });
   await Promise.all(
@@ -109,19 +167,64 @@ export async function notifyAdmins(
 }
 
 const CUSTOMER_EMAILS: FeatureKey = "customer_emails";
+const CUSTOMER_SMS: FeatureKey = "customer_sms";
+
+interface CustomerChannels {
+  /** company name used as the sender */
+  sender: string;
+  email: boolean;
+  sms: boolean;
+}
 
 /**
- * Sender name for customer emails, or null when the organization's plan
- * doesn't include customer emails (the email is then skipped silently —
- * not an error). Staff/driver/admin notifications are never gated.
+ * Which customer channels the organization's plan includes (customer_emails,
+ * customer_sms) and the sender name. A channel the plan lacks is skipped
+ * silently — not an error. Staff/driver/admin notifications are never gated.
  */
-async function customerEmailSender(organizationId: string): Promise<string | null> {
+async function customerChannels(organizationId: string): Promise<CustomerChannels | null> {
   const org = await db.organization.findUnique({
     where: { id: organizationId },
     select: { name: true, planRecord: { select: { features: true } } },
   });
-  if (!org?.planRecord?.features.includes(CUSTOMER_EMAILS)) return null;
-  return org.name?.trim() || "Your sender";
+  if (!org) return null;
+  const features: string[] = org.planRecord?.features ?? [];
+  return {
+    sender: org.name?.trim() || "Your sender",
+    email: features.includes(CUSTOMER_EMAILS),
+    sms: features.includes(CUSTOMER_SMS),
+  };
+}
+
+interface CustomerSmsInput {
+  organizationId: string;
+  deliveryId: string;
+  /** undefined = look it up on the delivery (callers that don't have it at hand) */
+  recipientPhone: string | null | undefined;
+  type: string;
+  title: string;
+  body: string;
+  /** e.g. `tracking:<deliveryId>`, `delivered:<deliveryId>`, `failed:<eventId>` */
+  eventKey: string;
+}
+
+/** Text the delivery recipient. No-op when the number isn't a valid Bangladesh mobile. */
+async function sendCustomerSms(input: CustomerSmsInput): Promise<void> {
+  const raw =
+    input.recipientPhone !== undefined
+      ? input.recipientPhone
+      : (await db.delivery.findUnique({ where: { id: input.deliveryId }, select: { recipientPhone: true } }))?.recipientPhone;
+  const phone = normalizeBdPhone(raw);
+  if (!phone) return; // missing or not a BD mobile number: skip, never an error
+  await notifySms({
+    organizationId: input.organizationId,
+    userId: null,
+    deliveryId: input.deliveryId,
+    type: input.type,
+    recipientPhone: phone,
+    title: input.title,
+    body: input.body,
+    dedupeKey: `sms:${input.eventKey}:${phone}`,
+  });
 }
 
 export interface CustomerTrackingEmailInput {
@@ -131,34 +234,59 @@ export interface CustomerTrackingEmailInput {
   trackingToken: string;
   recipientName: string;
   recipientEmail: string | null;
+  /** For the tracking SMS; when omitted it is read from the delivery. */
+  recipientPhone?: string | null;
 }
 
 /**
- * Email the delivery recipient their public tracking link (no-op when the
- * delivery has no recipient email, or the plan lacks customer_emails).
+ * Send the delivery recipient their public tracking link: by email (if the
+ * delivery has a recipient email and the plan has customer_emails) and by
+ * SMS (if it has a valid BD mobile number and the plan has customer_sms).
  * Call after the create has committed.
  */
 export async function sendCustomerTrackingEmail(input: CustomerTrackingEmailInput): Promise<void> {
   const to = input.recipientEmail?.trim();
-  if (!to) return;
-  const sender = await customerEmailSender(input.organizationId);
-  if (sender === null) return; // plan without customer_emails
-  const content = customerTrackingEmail({
-    companyName: sender,
-    recipientName: input.recipientName,
-    trackingCode: input.trackingCode,
-    trackingUrl: trackingUrl(input.trackingToken),
-  });
-  await notifyEmail({
-    organizationId: input.organizationId,
-    userId: null,
-    deliveryId: input.deliveryId,
-    type: "TRACKING",
-    recipientEmail: to,
-    title: content.subject,
-    body: content.text,
-    dedupeKey: `customer-tracking:${input.deliveryId}:${to.toLowerCase()}`,
-  });
+  if (!to && input.recipientPhone !== undefined && !normalizeBdPhone(input.recipientPhone)) return;
+  const channels = await customerChannels(input.organizationId);
+  if (!channels) return;
+  const url = trackingUrl(input.trackingToken);
+
+  const sendEmail = async () => {
+    if (!to || !channels.email) return;
+    const content = customerTrackingEmail({
+      companyName: channels.sender,
+      recipientName: input.recipientName,
+      trackingCode: input.trackingCode,
+      trackingUrl: url,
+    });
+    await notifyEmail({
+      organizationId: input.organizationId,
+      userId: null,
+      deliveryId: input.deliveryId,
+      type: "TRACKING",
+      recipientEmail: to,
+      title: content.subject,
+      body: content.text,
+      dedupeKey: `customer-tracking:${input.deliveryId}:${to.toLowerCase()}`,
+    });
+  };
+  // SMS problems are logged, never surfaced through the email path
+  const sendSms = () =>
+    channels.sms
+      ? bestEffort("customer tracking sms", () =>
+          sendCustomerSms({
+            organizationId: input.organizationId,
+            deliveryId: input.deliveryId,
+            recipientPhone: input.recipientPhone,
+            type: "TRACKING",
+            title: `Tracking link · ${input.trackingCode}`,
+            body: customerTrackingSms({ companyName: channels.sender, trackingCode: input.trackingCode, trackingUrl: url }),
+            eventKey: `tracking:${input.deliveryId}`,
+          })
+        )
+      : Promise.resolve();
+
+  await Promise.all([sendEmail(), sendSms()]);
 }
 
 export interface CustomerOutcomeEmailInput {
@@ -169,6 +297,8 @@ export interface CustomerOutcomeEmailInput {
     trackingToken: string;
     recipientName: string;
     recipientEmail: string | null;
+    /** For the outcome SMS; when omitted it is read from the delivery. */
+    recipientPhone?: string | null;
   };
   outcome: "DELIVERED" | "FAILED";
   /** Event key, e.g. `delivered:<deliveryId>` or `failed:<eventId>`; the recipient is appended. */
@@ -176,33 +306,56 @@ export interface CustomerOutcomeEmailInput {
 }
 
 /**
- * Tell the delivery recipient (if they have an email) that it was delivered,
- * or — neutrally, without internal reasons — that the attempt was unsuccessful.
+ * Tell the delivery recipient (by email and/or SMS, per plan) that it was
+ * delivered, or — neutrally, without internal reasons — that the attempt
+ * was unsuccessful.
  */
 export async function sendCustomerOutcomeEmail(input: CustomerOutcomeEmailInput): Promise<void> {
-  const to = input.delivery.recipientEmail?.trim();
-  if (!to) return;
-  const sender = await customerEmailSender(input.organizationId);
-  if (sender === null) return; // plan without customer_emails
-  const base = {
-    companyName: sender,
-    recipientName: input.delivery.recipientName,
-    trackingCode: input.delivery.trackingCode,
+  const { delivery } = input;
+  const to = delivery.recipientEmail?.trim();
+  if (!to && delivery.recipientPhone !== undefined && !normalizeBdPhone(delivery.recipientPhone)) return;
+  const channels = await customerChannels(input.organizationId);
+  if (!channels) return;
+  const url = trackingUrl(delivery.trackingToken);
+
+  const sendEmail = async () => {
+    if (!to || !channels.email) return;
+    const base = {
+      companyName: channels.sender,
+      recipientName: delivery.recipientName,
+      trackingCode: delivery.trackingCode,
+    };
+    const content =
+      input.outcome === "DELIVERED" ? customerDeliveredEmail({ ...base, trackingUrl: url }) : customerFailedEmail(base);
+    await notifyEmail({
+      organizationId: input.organizationId,
+      userId: null,
+      deliveryId: delivery.id,
+      type: input.outcome,
+      recipientEmail: to,
+      title: content.subject,
+      body: content.text,
+      dedupeKey: `customer-${input.eventKey}:${to.toLowerCase()}`,
+    });
   };
-  const content =
-    input.outcome === "DELIVERED"
-      ? customerDeliveredEmail({ ...base, trackingUrl: trackingUrl(input.delivery.trackingToken) })
-      : customerFailedEmail(base);
-  await notifyEmail({
-    organizationId: input.organizationId,
-    userId: null,
-    deliveryId: input.delivery.id,
-    type: input.outcome,
-    recipientEmail: to,
-    title: content.subject,
-    body: content.text,
-    dedupeKey: `customer-${input.eventKey}:${to.toLowerCase()}`,
-  });
+  const sendSms = () => {
+    if (!channels.sms) return Promise.resolve();
+    const smsInput = { companyName: channels.sender, trackingCode: delivery.trackingCode, trackingUrl: url };
+    const delivered = input.outcome === "DELIVERED";
+    return bestEffort("customer outcome sms", () =>
+      sendCustomerSms({
+        organizationId: input.organizationId,
+        deliveryId: delivery.id,
+        recipientPhone: delivery.recipientPhone,
+        type: input.outcome,
+        title: `${delivered ? "Delivered" : "Delivery not completed"} · ${delivery.trackingCode}`,
+        body: delivered ? customerDeliveredSms(smsInput) : customerFailedSms(smsInput),
+        eventKey: input.eventKey,
+      })
+    );
+  };
+
+  await Promise.all([sendEmail(), sendSms()]);
 }
 
 interface AuditInput {

@@ -152,6 +152,7 @@ export interface PlatformOrgDetail {
     plan: string;
     subscriptionStatus: SubscriptionStatus;
     paidUntil: string | null;
+    trialEndsAt: string | null;
     billingNotes: string | null;
     billingCycle: BillingCycle;
     subscriptionPriceBdt: number | null;
@@ -225,14 +226,14 @@ export type OrgAction =
    * plans can be newly assigned.
    */
   | { action: "set-plan"; plan: PlanCode; billingCycle: BillingCycle; priceBdt?: number | null }
-  | { action: "update-subscription"; subscriptionStatus: SubscriptionStatus; paidUntil: string | null; billingNotes: string | null };
+  | { action: "update-subscription"; subscriptionStatus: SubscriptionStatus; paidUntil: string | null; trialEndsAt?: string | null; billingNotes: string | null };
 
 // GET /api/platform/users?search=&role=&status=&organizationId=&page=
 export interface PlatformUserRow {
   id: string;
   name: string;
   email: string;
-  role: "ADMIN" | "DRIVER";
+  role: "ADMIN" | "DISPATCHER" | "DRIVER";
   active: boolean;
   mustChangePassword: boolean;
   lastLoginAt: string | null;
@@ -299,11 +300,20 @@ export interface PlatformAuditRow {
 // GET /api/platform/settings
 export interface PlatformSettingsData {
   admin: PlatformAdminInfo;
-  platformAdmins: (PlatformAdminInfo & { active: boolean })[];
+  /** The signed-in admin's two-factor sign-in (mandatory; never the secret). */
+  twoFactor: PlatformTwoFactorStatus;
+  platformAdmins: (PlatformAdminInfo & { active: boolean; twoFactorEnabled: boolean })[];
   environment: {
     emailProvider: string;
     emailConfigured: boolean;
     signupEnabled: boolean;
     demoMode: boolean;
   };
+}
+
+// Two-factor sign-in for super admins (src/lib/platform-mfa.ts)
+export interface PlatformTwoFactorStatus {
+  enabled: boolean;
+  enabledAt: string | null;
+  backupCodesRemaining: number;
 }

@@ -44,6 +44,7 @@ import { Label } from "@/components/ui/label";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
+import { CustomerRatingsCard } from "@/components/fleetflow/customer-ratings-card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { api, useApiData } from "@/lib/api-client";
 import {
@@ -63,7 +64,8 @@ import {
   type DeliveryStatus,
   type Priority,
 } from "@/lib/constants";
-import { downloadCsv, formatDate, formatDateTime } from "@/lib/format";
+import { displayTimezone, downloadCsv, formatBdt, formatDate, formatDateTime } from "@/lib/format";
+import { tzQueryOffset } from "@/lib/zoned";
 import { cn } from "@/lib/utils";
 import type { DriverItem, ReportData, VehicleItem } from "@/lib/types";
 
@@ -252,6 +254,42 @@ function FailureReasons({ rows, failed }: { rows: ReportData["failureReasons"]; 
   );
 }
 
+// ── Delivery charges by zone (docs/ZONES.md) ─────────────────
+
+function ChargesByZone({ charges }: { charges: ReportData["charges"] }) {
+  if (!charges || charges.byZone.length === 0) return null;
+  const max = Math.max(1, ...charges.byZone.map((r) => r.chargesBdt));
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-base">Delivery charges</CardTitle>
+        <CardDescription className="text-xs">
+          <span className="font-semibold text-foreground tabular-nums">{formatBdt(charges.totalChargesBdt)}</span> charged in this range
+          (cancelled deliveries excluded) · {formatBdt(charges.deliveredChargesBdt)} on delivered orders
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        <ul className="flex flex-col gap-3" aria-label="Delivery charges by zone">
+          {charges.byZone.map((r) => (
+            <li key={r.zoneId ?? "none"} className="flex flex-col gap-1.5">
+              <div className="flex items-baseline justify-between gap-3 text-sm">
+                <span className={cn("truncate", !r.zoneId && "text-muted-foreground italic")}>{r.zoneName}</span>
+                <span className="shrink-0 tabular-nums text-muted-foreground">
+                  {plural(r.deliveries, "delivery", "deliveries")} · {r.delivered} delivered ·{" "}
+                  <span className="font-medium text-foreground">{formatBdt(r.chargesBdt)}</span>
+                </span>
+              </div>
+              <div className="h-1.5 w-full overflow-hidden rounded-full bg-muted" aria-hidden="true">
+                <div className="h-full rounded-full bg-primary/70" style={{ width: `${(r.chargesBdt / max) * 100}%` }} />
+              </div>
+            </li>
+          ))}
+        </ul>
+      </CardContent>
+    </Card>
+  );
+}
+
 // ── Filter field wrapper ─────────────────────────────────────
 
 function FilterField({
@@ -303,7 +341,7 @@ export default function ReportsView() {
         params.set(key, value);
       }
     }
-    params.set("tz", String(new Date().getTimezoneOffset()));
+    params.set("tz", String(tzQueryOffset(displayTimezone())));
     return `/api/reports?${params.toString()}`;
   }, [applied]);
 
@@ -365,7 +403,7 @@ export default function ReportsView() {
       return;
     }
     const rows: (string | number | null)[][] = [
-      ["Tracking", "Recipient", "Driver", "Vehicle", "Status", "Priority", "Created", "Expected", "Completed", "Timeliness", "Failure reason"],
+      ["Tracking", "Recipient", "Driver", "Vehicle", "Status", "Priority", "Created", "Expected", "Completed", "Timeliness", "Failure reason", "Zone", "Delivery charge (BDT)"],
       ...full.items.map((it) => [
         it.trackingCode,
         it.recipientName,
@@ -378,6 +416,8 @@ export default function ReportsView() {
         it.completedAt ? formatDateTime(it.completedAt) : "",
         it.timeliness ? (TIMELINESS[it.timeliness]?.label ?? it.timeliness) : "",
         it.status === "FAILED" ? failureReasonLabel(it.failureReason) : "",
+        it.zoneName ?? "",
+        it.deliveryFeeBdt ?? "",
       ]),
     ];
     downloadCsv("fleetflow-report.csv", rows);
@@ -595,6 +635,11 @@ export default function ReportsView() {
               </h2>
               <MetricDefinitions />
             </div>
+            {data?.metricsTruncated && (
+              <p className="text-xs text-muted-foreground">
+                On-time, timing and driver figures use the most recent 20,000 deliveries. Pick a date range for exact figures over a longer period.
+              </p>
+            )}
             <div className="grid grid-cols-2 gap-4 md:grid-cols-3 xl:grid-cols-5">
               <SummaryCard icon={Package} tone="zinc" label="Total deliveries" value={String(summary?.total ?? 0)} hint="created in selected range" />
               <SummaryCard
@@ -719,6 +764,10 @@ export default function ReportsView() {
             <FailureReasons rows={data.failureReasons ?? []} failed={summary?.failed ?? 0} />
           </section>
 
+          <CustomerRatingsCard ratings={data.ratings} />
+
+          <ChargesByZone charges={data.charges} />
+
           {/* Driver performance */}
           <Card>
             <CardHeader>
@@ -754,12 +803,13 @@ export default function ReportsView() {
                     <TableHead className="text-right">Late</TableHead>
                     <TableHead className="text-right">On-time %</TableHead>
                     <TableHead className="text-right">Avg on road</TableHead>
+                    <TableHead className="text-right">Rating</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
                   {driverRows.length === 0 ? (
                     <TableRow>
-                      <TableCell colSpan={8} className="h-20 text-center text-muted-foreground">
+                      <TableCell colSpan={9} className="h-20 text-center text-muted-foreground">
                         No driver activity in this range.
                       </TableCell>
                     </TableRow>
@@ -795,6 +845,12 @@ export default function ReportsView() {
                             title={row.roadTimeExcluded ? `${row.roadTimeExcluded} excluded (missing timestamps)` : undefined}
                           >
                             {hrs(row.avgRoadHours)}
+                          </TableCell>
+                          <TableCell
+                            className="text-right tabular-nums text-muted-foreground"
+                            title={row.ratingCount ? `Average of ${row.ratingCount} customer ${row.ratingCount === 1 ? "rating" : "ratings"}` : "No customer ratings yet"}
+                          >
+                            {row.avgRating != null ? `★ ${row.avgRating.toFixed(1)}` : "—"}
                           </TableCell>
                         </TableRow>
                       );

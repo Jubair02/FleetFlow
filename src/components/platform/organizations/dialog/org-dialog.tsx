@@ -32,6 +32,7 @@ import { OverviewSkeleton, OverviewTab } from "./overview-tab";
 import { SubscriptionDialog } from "./subscription-dialog";
 import { SubscriptionSkeleton, SubscriptionTab } from "./subscription-tab";
 import { UsersSkeleton, UsersTab } from "./users-tab";
+import { OrgInvoicesSection } from "../../invoices/org-invoices";
 
 export interface OrgDialogState {
   id: string;
@@ -206,7 +207,10 @@ function OrgDialogBody({ orgId, initialTab, onClose }: { orgId: string; initialT
         <TabsContent value="subscription">
           {body(
             (d) => (
-              <SubscriptionTab detail={d} onChangePlan={() => open("plan")} onEditSubscription={() => open("subscription")} />
+              <div className="flex flex-col gap-8">
+                <SubscriptionTab detail={d} onChangePlan={() => open("plan")} onEditSubscription={() => open("subscription")} />
+                <OrgInvoicesSection detail={d} />
+              </div>
             ),
             <SubscriptionSkeleton />
           )}

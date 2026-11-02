@@ -1,6 +1,7 @@
 "use client";
 
 import { ExternalLink, MoreHorizontal, Route, Truck, UserX, X } from "lucide-react";
+import { formatTime } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import type { DispatchDriver } from "@/lib/types";
 import { goToDelivery } from "@/store/app-store";
@@ -26,6 +27,7 @@ export function RoadPanel({
   driverFilter,
   onClearDriverFilter,
   onUnassign,
+  onOpenRoute,
 }: {
   assignments: ActiveAssignment[];
   drivers: DispatchDriver[];
@@ -33,12 +35,16 @@ export function RoadPanel({
   driverFilter: string | null;
   onClearDriverFilter: () => void;
   onUnassign: (a: ActiveAssignment) => void;
+  /** Open the route planner for a driver (dispatch/route-dialog.tsx). */
+  onOpenRoute?: (driver: { id: string; name: string }) => void;
 }) {
   const byId = new Map(drivers.map((d) => [d.id, d]));
   const map = new Map<string, Group>();
   for (const a of assignments) {
     const g = map.get(a.driverId) ?? { driverId: a.driverId, driverName: a.driverName, driver: byId.get(a.driverId) ?? null, items: [] };
     g.items.push(a);
+    // planned route order first (Stop 1, 2, …), unplanned stops after in their existing order
+    g.items.sort((x, y) => (x.delivery.routeSeq ?? Infinity) - (y.delivery.routeSeq ?? Infinity) || 0);
     map.set(a.driverId, g);
   }
   const groups = [...map.values()]
@@ -110,6 +116,18 @@ export function RoadPanel({
                     </span>
                   ))}
                   {g.driver ? <LoadBar driver={g.driver} className="ml-auto w-28 sm:ml-0" /> : null}
+                  {onOpenRoute ? (
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="min-h-11 shrink-0 rounded-xl sm:min-h-8"
+                      onClick={() => onOpenRoute({ id: g.driverId, name: g.driverName })}
+                      aria-label={`Plan ${g.driverName}'s route`}
+                    >
+                      <Route aria-hidden="true" /> Route
+                    </Button>
+                  ) : null}
                 </div>
               </header>
               <ul className="divide-y divide-border/60 dark:divide-white/[0.07]">
@@ -129,7 +147,15 @@ export function RoadPanel({
                           <span className="block truncate">{line1}</span>
                           {line2 ? <span className="block truncate text-xs text-muted-foreground">{line2}</span> : null}
                         </p>
-                        <DueText delivery={a.delivery} nowMs={nowMs} className="mt-1 md:mt-0" />
+                        <div className="mt-1 min-w-0 md:mt-0 md:text-right">
+                          <DueText delivery={a.delivery} nowMs={nowMs} />
+                          {a.delivery.routeSeq ? (
+                            <p className="text-xs tabular-nums text-muted-foreground">
+                              Stop {a.delivery.routeSeq}
+                              {a.delivery.plannedEta ? ` · ETA ${formatTime(a.delivery.plannedEta)}` : ""}
+                            </p>
+                          ) : null}
+                        </div>
                       </div>
                       <DropdownMenu modal={false}>
                         <DropdownMenuTrigger asChild>

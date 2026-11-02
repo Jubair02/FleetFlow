@@ -16,6 +16,7 @@ import {
   Trash2,
   UserCheck,
   UserX,
+  MapPin,
 } from "lucide-react";
 
 import { api, useApiData } from "@/lib/api-client";
@@ -29,9 +30,11 @@ import {
   failureReasonLabel,
 } from "@/lib/constants";
 import { PriorityBadge, STATUS_ICONS, StatusBadge, VehicleTypeLabel } from "@/components/fleetflow/badges";
-import { formatDateTime, friendlyDueDate, timeAgo, truncate } from "@/lib/format";
+import { formatDateTime, formatTime, friendlyDueDate, timeAgo, truncate, formatBdt } from "@/lib/format";
 import { AssignDialog } from "@/components/fleetflow/assign-dialog";
+import { CustomerFeedbackPanel, RescheduleBadge } from "@/components/fleetflow/customer-feedback-panel";
 import { DeliveryFormDialog } from "@/components/fleetflow/delivery-form-dialog";
+import { DeliveryLocationPanel } from "@/components/fleetflow/map/delivery-location-panel";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -156,6 +159,7 @@ export function DeliveryDetailDialog({
   const [overrideStatus, setOverrideStatus] = useState("");
   const [overrideReason, setOverrideReason] = useState("");
   const [overrideFailure, setOverrideFailure] = useState("");
+  const [overrideCod, setOverrideCod] = useState("");
   const [overrideErrors, setOverrideErrors] = useState({ status: false, reason: false, failure: false });
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [podPreview, setPodPreview] = useState<PodItem | null>(null);
@@ -170,7 +174,7 @@ export function DeliveryDetailDialog({
     (a, b) => new Date(b.assignedAt).getTime() - new Date(a.assignedAt).getTime(),
   );
   const trackingUrl = delivery?.trackingToken
-    ? `${typeof window === "undefined" ? "" : window.location.origin}/?track=${delivery.trackingToken}`
+    ? `${typeof window === "undefined" ? "" : window.location.origin}/track/${delivery.trackingToken}`
     : "";
 
   // Skeleton only before the first answer; keep content visible while refetching.
@@ -283,12 +287,18 @@ export function DeliveryDetailDialog({
     };
     setOverrideErrors(errs);
     if (errs.status || errs.reason || errs.failure) return;
+    const needsCod = overrideStatus === "DELIVERED" && !!data?.delivery.codAmount;
+    if (needsCod && !/^d+$/.test(overrideCod.trim())) {
+      toast.error("Enter the cash the driver collected, in whole taka");
+      return;
+    }
     void runMutation(
       () =>
         api.post(`/api/deliveries/${deliveryId}/status`, {
           status: overrideStatus,
           note: overrideReason.trim(),
           ...(overrideStatus === "FAILED" ? { failureReason: overrideFailure } : {}),
+          ...(needsCod ? { codCollectedAmount: Number(overrideCod.trim()) } : {}),
         }),
       `Status overridden to ${STATUS_LABELS[overrideStatus as DeliveryStatus] ?? overrideStatus}`,
       () => {
@@ -296,6 +306,7 @@ export function DeliveryDetailDialog({
         setOverrideStatus("");
         setOverrideReason("");
         setOverrideFailure("");
+        setOverrideCod("");
         setOverrideErrors({ status: false, reason: false, failure: false });
       },
     );
@@ -352,6 +363,7 @@ export function DeliveryDetailDialog({
                   <span className="font-mono">{delivery.trackingCode}</span>
                   <StatusBadge status={delivery.status} />
                   <PriorityBadge priority={delivery.priority} />
+                  <RescheduleBadge delivery={delivery} />
                 </>
               ) : (
                 "Delivery details"
@@ -408,6 +420,39 @@ export function DeliveryDetailDialog({
                     {delivery.recipientPhone}
                   </a>
                 </Field>
+                {delivery.codAmount ? (
+                  <Field label="Cash on delivery">
+                    <span className="font-semibold tabular-nums">{formatBdt(delivery.codAmount)}</span>
+                    {delivery.codCollectedAt ? (
+                      <span
+                        className={cn(
+                          "ml-2 text-xs",
+                          (delivery.codCollectedAmount ?? 0) < delivery.codAmount ? "text-rose-600 dark:text-rose-400" : "text-muted-foreground",
+                        )}
+                      >
+                        collected {formatBdt(delivery.codCollectedAmount ?? 0)} · {delivery.codSettled ? "handed over" : "with driver"}
+                      </span>
+                    ) : (
+                      <span className="ml-2 text-xs text-muted-foreground">to collect</span>
+                    )}
+                  </Field>
+                ) : null}
+                {delivery.charge && (delivery.charge.deliveryFeeBdt !== null || delivery.charge.zoneId || delivery.charge.weightKg) ? (
+                  <Field label="Delivery charge">
+                    <span className="font-semibold tabular-nums">
+                      {delivery.charge.deliveryFeeBdt !== null ? formatBdt(delivery.charge.deliveryFeeBdt) : "—"}
+                    </span>
+                    <span className="ml-2 text-xs text-muted-foreground">
+                      {[
+                        delivery.charge.zoneName ?? (delivery.charge.zoneId ? null : "no zone"),
+                        delivery.charge.weightKg ? `${delivery.charge.weightKg} kg` : null,
+                        delivery.charge.feeOverridden ? "set by hand" : null,
+                      ]
+                        .filter(Boolean)
+                        .join(" · ")}
+                    </span>
+                  </Field>
+                ) : null}
                 {delivery.externalRef ? (
                   <Field label="Order reference">
                     <span className="font-mono">{delivery.externalRef}</span>
@@ -445,6 +490,10 @@ export function DeliveryDetailDialog({
                 ) : null}
               </dl>
 
+              <DeliveryLocationPanel delivery={delivery} canLocate={canEdit} />
+
+              <CustomerFeedbackPanel delivery={delivery} />
+
               {/* Current assignment */}
               <div className="rounded-lg border p-4">
                 <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
@@ -459,6 +508,12 @@ export function DeliveryDetailDialog({
                       (<VehicleTypeLabel type={delivery.assignment.vehicleType} />)
                     </span>
                     <span className="text-muted-foreground">· assigned {timeAgo(delivery.assignment.assignedAt)}</span>
+                    {delivery.routeSeq ? (
+                      <span className="basis-full text-xs tabular-nums text-muted-foreground">
+                        <span className="font-medium text-foreground">Stop {delivery.routeSeq}</span> on the planned route
+                        {delivery.plannedEta ? ` · ETA ${formatTime(delivery.plannedEta)} (estimate)` : ""}
+                      </span>
+                    ) : null}
                   </div>
                 ) : (
                   <p className="mt-1.5 text-sm text-muted-foreground">Not assigned</p>
@@ -667,6 +722,11 @@ export function DeliveryDetailDialog({
                         </span>
                         <span className="block truncate text-xs text-muted-foreground">{pod.recipientName}</span>
                         <span className="block text-xs text-muted-foreground">{formatDateTime(pod.capturedAt)}</span>
+                        {pod.location && (
+                          <span className="flex items-center gap-1 text-xs text-muted-foreground">
+                            <MapPin className="size-3" aria-hidden="true" /> Location recorded
+                          </span>
+                        )}
                       </button>
                     ))}
                   </div>
@@ -980,6 +1040,26 @@ export function DeliveryDetailDialog({
                   </div>
                 ) : null}
 
+                {overrideStatus === "DELIVERED" && data?.delivery.codAmount ? (
+                  <div className="space-y-2">
+                    <Label htmlFor="override-cod">
+                      Cash collected by the driver <span className="text-destructive">*</span>
+                    </Label>
+                    <Input
+                      id="override-cod"
+                      inputMode="numeric"
+                      value={overrideCod}
+                      onChange={(e) => setOverrideCod(e.target.value.replace(/[^d]/g, ""))}
+                      placeholder={String(data.delivery.codAmount)}
+                      className="min-h-11 sm:min-h-9"
+                      aria-describedby="override-cod-hint"
+                    />
+                    <p id="override-cod-hint" className="text-xs text-muted-foreground">
+                      {formatBdt(data.delivery.codAmount)} is due. The cash counts as held by the assigned driver until it&apos;s handed over.
+                    </p>
+                  </div>
+                ) : null}
+
                 <div className="space-y-2">
                   <Label htmlFor="override-reason">
                     Reason <span className="text-destructive">*</span>
@@ -1072,6 +1152,19 @@ export function DeliveryDetailDialog({
                   alt={`${podPreview.kind === "SIGNATURE" ? "Signature" : "Photo"} proof of delivery — ${podPreview.recipientName}`}
                   className="max-h-[65vh] w-full rounded-lg border bg-white object-contain p-2"
                 />
+              ) : null}
+              {podPreview?.location ? (
+                <a
+                  href={`https://www.google.com/maps?q=${podPreview.location.latitude},${podPreview.location.longitude}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-1.5 text-sm text-primary hover:underline"
+                >
+                  <MapPin className="size-4" aria-hidden="true" />
+                  Where the driver was
+                  {podPreview.location.accuracyM !== null ? ` (±${Math.round(podPreview.location.accuracyM)} m)` : ""}
+                  <span className="sr-only">(opens Google Maps in a new tab)</span>
+                </a>
               ) : null}
             </DialogContent>
           </Dialog>

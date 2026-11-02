@@ -1,6 +1,6 @@
 import { db } from "@/lib/db";
 import { hashPassword } from "@/lib/auth";
-import { ApiError, fail, ok, readJson, requireAdmin } from "@/lib/api-helpers";
+import { ApiError, fail, ok, readJson, requireStaff } from "@/lib/api-helpers";
 import { resetPasswordSchema, firstError } from "@/lib/validation";
 import { generateTempPassword } from "@/lib/account";
 import { TX_OPTIONS } from "@/lib/delivery";
@@ -13,7 +13,7 @@ type Params = { params: Promise<{ id: string }> };
 // The temporary password is returned once and never stored in plain text.
 export async function POST(req: Request, { params }: Params) {
   try {
-    const user = await requireAdmin();
+    const user = await requireStaff();
     const { id } = await params;
     const parsed = resetPasswordSchema.safeParse(await readJson<unknown>(req));
     if (!parsed.success) throw new ApiError(400, firstError(parsed.error));

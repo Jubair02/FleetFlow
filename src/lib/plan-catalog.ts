@@ -22,6 +22,10 @@ export const FEATURES = {
   csv_import: { label: "CSV delivery import", description: "Bulk-import deliveries from a spreadsheet" },
   report_export: { label: "Report CSV export", description: "Download delivery and driver performance reports" },
   customer_emails: { label: "Customer emails", description: "Email recipients their tracking link and delivery outcome" },
+  customer_sms: { label: "Customer SMS", description: "Text recipients their tracking link and delivery outcome" },
+  api_access: { label: "API & webhooks", description: "Connect your store or systems with API keys and webhooks" },
+  live_map: { label: "Live map & routes", description: "Live driver map, route optimisation and arrival estimates" },
+  branded_tracking: { label: "Branded tracking", description: "Your logo and colour on customer tracking pages" },
 } as const;
 export type FeatureKey = keyof typeof FEATURES;
 export const FEATURE_KEYS = Object.keys(FEATURES) as FeatureKey[];

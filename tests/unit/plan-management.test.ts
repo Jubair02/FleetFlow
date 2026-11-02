@@ -8,9 +8,9 @@ const db = vi.hoisted(() => ({
   $queryRaw: vi.fn(),
   plan: { findUnique: vi.fn(), findUniqueOrThrow: vi.fn(), findFirst: vi.fn(), update: vi.fn(), updateMany: vi.fn() },
   organization: { findUnique: vi.fn(), findUniqueOrThrow: vi.fn(), findMany: vi.fn(), update: vi.fn(), updateMany: vi.fn(), count: vi.fn() },
-  user: { count: vi.fn() },
-  vehicle: { count: vi.fn() },
-  delivery: { count: vi.fn() },
+  user: { count: vi.fn(), groupBy: vi.fn() },
+  vehicle: { count: vi.fn(), groupBy: vi.fn() },
+  delivery: { count: vi.fn(), groupBy: vi.fn() },
   auditLog: { create: vi.fn(), createMany: vi.fn() },
   platformAuditLog: { create: vi.fn() },
 }));
@@ -19,7 +19,7 @@ vi.mock("next/headers", () => ({ cookies: async () => ({ get: () => undefined, s
 const guard = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/platform-auth", async (orig) => ({ ...(await orig<typeof import("@/lib/platform-auth")>()), requirePlatformAdmin: guard }));
 const requireAdmin = vi.hoisted(() => vi.fn());
-vi.mock("@/lib/api-helpers", async (orig) => ({ ...(await orig<typeof import("@/lib/api-helpers")>()), requireAdmin }));
+vi.mock("@/lib/api-helpers", async (orig) => ({ ...(await orig<typeof import("@/lib/api-helpers")>()), requireAdmin, requireStaff: requireAdmin }));
 
 import { ApiError } from "@/lib/api-helpers";
 import { assertFeature, toPlanDefinition } from "@/lib/plans";
@@ -197,6 +197,13 @@ describe("PATCH /api/platform/plans/[code]", () => {
     db.user.count.mockImplementation(async ({ where }: { where: { role: string } }) => (where.role === "DRIVER" ? 12 : 1));
     db.vehicle.count.mockResolvedValue(2);
     db.delivery.count.mockResolvedValue(10);
+    // previewLimitImpact batches the same counts with groupBy
+    db.user.groupBy.mockResolvedValue([
+      { organizationId: "o1", role: "DRIVER", _count: { _all: 12 } },
+      { organizationId: "o1", role: "ADMIN", _count: { _all: 1 } },
+    ]);
+    db.vehicle.groupBy.mockResolvedValue([{ organizationId: "o1", _count: { _all: 2 } }]);
+    db.delivery.groupBy.mockResolvedValue([{ organizationId: "o1", _count: { _all: 10 } }]);
   });
 
   it("is guarded", async () => {

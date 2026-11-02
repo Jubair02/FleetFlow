@@ -120,5 +120,63 @@ export async function closeAssignment(tx: Tx, assignment: Pick<Assignment, "id" 
     },
   });
   if (res.count !== 1) throw new ApiError(409, "The assignment was changed by someone else — refresh and retry");
+  await clearRouteStop(tx, assignment);
   await syncDriverAvailability(tx, assignment.driverId);
+}
+
+/**
+ * The delivery left the driver's route (unassigned, delivered, failed,
+ * cancelled): clear its stop number and estimate, and close the gap so the
+ * driver's remaining stops stay numbered 1, 2, 3… (src/lib/route-service.ts).
+ * The driver's profile lock (held by closeAssignment) serializes this with
+ * route planning.
+ */
+async function clearRouteStop(tx: Tx, assignment: Pick<Assignment, "id" | "driverId">): Promise<void> {
+  const delivery = await tx.delivery.findFirst({
+    where: { assignments: { some: { id: assignment.id } } },
+    select: { id: true, routeSeq: true, routePlannedAt: true, plannedEta: true },
+  });
+  if (!delivery || (delivery.routeSeq == null && !delivery.routePlannedAt && !delivery.plannedEta)) return;
+  await tx.delivery.update({ where: { id: delivery.id }, data: { routeSeq: null, routePlannedAt: null, plannedEta: null } });
+  if (delivery.routeSeq == null) return;
+  await tx.delivery.updateMany({
+    where: {
+      id: { not: delivery.id },
+      routeSeq: { gt: delivery.routeSeq },
+      assignments: { some: { driverId: assignment.driverId, active: true } },
+    },
+    data: { routeSeq: { decrement: 1 } },
+  });
+}
+
+// ── Cash on delivery ─────────────────────────────────────────
+
+/**
+ * Fields to write when a COD delivery is completed: the cash the driver
+ * actually collected (it may differ from codAmount — short payments show up
+ * in the COD report). Prepaid deliveries need nothing.
+ */
+export function codCompletionData(
+  delivery: Pick<Delivery, "codAmount">,
+  collected: number | undefined,
+  driverId: string | null,
+  now: Date
+): Prisma.DeliveryUncheckedUpdateInput {
+  if (!delivery.codAmount) return {};
+  if (collected === undefined) {
+    throw new ApiError(400, `Enter the cash collected — ৳${delivery.codAmount.toLocaleString("en-US")} is due on this delivery`);
+  }
+  return { codCollectedAmount: collected, codCollectedAt: now, codCollectedById: driverId };
+}
+
+/**
+ * Fields to clear when a delivered COD delivery is reopened. Cash already
+ * handed over to the office can't be un-collected, so that is refused.
+ */
+export function codReopenData(delivery: Pick<Delivery, "codCollectedAt" | "codSettlementId">): Prisma.DeliveryUncheckedUpdateInput {
+  if (!delivery.codCollectedAt) return {};
+  if (delivery.codSettlementId) {
+    throw new ApiError(409, "The cash for this delivery was already handed over to the office — it can't be reopened");
+  }
+  return { codCollectedAmount: null, codCollectedAt: null, codCollectedById: null };
 }

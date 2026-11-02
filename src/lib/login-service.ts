@@ -1,9 +1,10 @@
 import type { PlatformAdmin } from "@prisma/client";
 import { db } from "@/lib/db";
 import { ApiError } from "@/lib/api-helpers";
-import { createSession, getDummyHash, verifyPassword } from "@/lib/auth";
+import { SESSION_ORG_SELECT, createSession, getDummyHash, verifyPassword } from "@/lib/auth";
 import { clearFailures, recordFailure, retryAfter } from "@/lib/rate-limit";
 import { createPlatformSession, platformAuditData } from "@/lib/platform-auth";
+import { mfaStageFor, type MfaStage } from "@/lib/platform-mfa";
 
 // ─────────────────────────────────────────────────────────────
 // The one sign-in implementation for every kind of account.
@@ -17,9 +18,13 @@ import { createPlatformSession, platformAuditData } from "@/lib/platform-auth";
 // If one email exists in both tables, the platform account wins only when
 // the password matches the platform account; otherwise the company account
 // is used. Staff should use a separate email for any company account.
+//
+// Staff sign-in is two-step: a correct password only opens a short-lived
+// pending session, and the authenticator code (src/lib/platform-mfa.ts,
+// /api/platform/auth/mfa/*) completes it.
 // ─────────────────────────────────────────────────────────────
 
-const dto = { user: { include: { driverProfile: true, organization: { select: { id: true, name: true, status: true } } } } };
+const dto = { user: { include: { driverProfile: true, organization: { select: SESSION_ORG_SELECT } } } };
 
 type TenantUser = NonNullable<Awaited<ReturnType<typeof findTenantUser>>>;
 
@@ -28,7 +33,7 @@ function findTenantUser(email: string) {
 }
 
 export type LoginResult =
-  | { kind: "platform"; admin: PlatformAdmin; redirectTo: "/platform" }
+  | { kind: "platform"; admin: PlatformAdmin; mfa: MfaStage; redirectTo: "/platform" }
   | { kind: "tenant"; user: TenantUser; redirectTo: "/" };
 
 export interface LoginOptions {
@@ -67,12 +72,14 @@ export async function authenticate(rawEmail: string, password: string, ip: strin
 
   if (admin && adminOk && admin.active) {
     await clearFailures(keys[0]); // only the account key — a valid login must not reset the per-client counter
-    const updated = await db.platformAdmin.update({ where: { id: admin.id }, data: { lastLoginAt: new Date() } });
-    await createPlatformSession(admin.id);
+    // Password only: a pending session that just reaches the two-factor step.
+    // lastLoginAt and PLATFORM_LOGIN are written once the code is accepted.
+    const mfa = mfaStageFor(admin);
+    await createPlatformSession(admin.id, { mfaPending: true });
     await db.platformAuditLog.create({
-      data: platformAuditData({ actor: admin, action: "PLATFORM_LOGIN", targetType: "PlatformAdmin", targetId: admin.id, ip }),
+      data: platformAuditData({ actor: admin, action: "PLATFORM_LOGIN_PASSWORD_OK", targetType: "PlatformAdmin", targetId: admin.id, detail: { mfa }, ip }),
     });
-    return { kind: "platform", admin: updated, redirectTo: "/platform" };
+    return { kind: "platform", admin, mfa, redirectTo: "/platform" };
   }
 
   if (user && userOk) {

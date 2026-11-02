@@ -1,5 +1,5 @@
 import { db } from "@/lib/db";
-import { fail, localDayKey, ok, parseTzOffset, requireAdmin } from "@/lib/api-helpers";
+import { fail, localDayKey, ok, parseTzOffset, requireStaff } from "@/lib/api-helpers";
 import { onTimeRateFromCounts, summarizeStatuses } from "@/lib/report-metrics";
 import { ACTIVE_DELIVERY_STATUSES, DAY_MS, summarizeDeadlines } from "@/lib/dashboard-metrics";
 
@@ -9,7 +9,7 @@ const CHART_DAYS = 14;
 // `tz` = viewer's getTimezoneOffset(); the daily chart is keyed by their local date.
 export async function GET(req: Request) {
   try {
-    const user = await requireAdmin();
+    const user = await requireStaff();
     const orgId = user.organizationId;
     const tz = parseTzOffset(new URL(req.url).searchParams.get("tz"));
 
@@ -107,6 +107,18 @@ export async function GET(req: Request) {
       }),
     ]);
 
+    // Customer reschedule requests waiting for an answer (tracking page).
+    const rescheduleWhere = { ...orgDeliveries, rescheduleStatus: "PENDING" };
+    const [rescheduleCount, rescheduleList] = await Promise.all([
+      db.delivery.count({ where: rescheduleWhere }),
+      db.delivery.findMany({
+        where: rescheduleWhere,
+        select: { id: true, trackingCode: true, rescheduleRequestedFor: true },
+        orderBy: [{ rescheduleRequestedAt: "asc" }, { id: "asc" }],
+        take: 5,
+      }),
+    ]);
+
     const byStatus = (s: string) => statusCounts.find((c) => c.status === s)?._count._all ?? 0;
     const counts = summarizeStatuses(statusCounts.map((c) => ({ status: c.status, count: c._count._all })));
 
@@ -178,6 +190,12 @@ export async function GET(req: Request) {
       attention: {
         failedCount: byStatus("FAILED"),
         pendingUrgentCount,
+        rescheduleCount,
+        rescheduleRequests: rescheduleList.map((d) => ({
+          id: d.id,
+          trackingCode: d.trackingCode,
+          requestedFor: d.rescheduleRequestedFor?.toISOString() ?? null,
+        })),
         failedDeliveries: failedList.map((d) => ({ ...d, createdAt: d.createdAt.toISOString() })),
         pendingUrgent: urgentList.map((d) => ({ ...d, expectedAt: d.expectedAt?.toISOString() ?? null })),
         maintenanceVehicles: attentionVehicles.map((v) => ({

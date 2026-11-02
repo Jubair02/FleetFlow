@@ -13,12 +13,12 @@ datasource db {
 // ─────────────────────────────────────────────────────────────
 
 model Organization {
-  id        String   @id @default(cuid())
-  name      String
-  plan      String   @default("trial") // Plan.code (FK) — plans are managed in the platform console
-  planRecord Plan    @relation(fields: [plan], references: [code], onUpdate: Cascade, onDelete: Restrict)
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  id         String   @id @default(cuid())
+  name       String
+  plan       String   @default("trial") // Plan.code (FK) — plans are managed in the platform console
+  planRecord Plan     @relation(fields: [plan], references: [code], onUpdate: Cascade, onDelete: Restrict)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
 
   // Company profile & settings (onboarding)
   phone                 String?
@@ -27,6 +27,16 @@ model Organization {
   defaultPickupAddress  String?
   timezone              String    @default("Asia/Dhaka")
   onboardingDismissedAt DateTime?
+  // Depot / default pickup point on the map (route planning starts here).
+  pickupLat             Float?
+  pickupLng             Float?
+
+  // Customer-facing tracking page (branding needs the branded_tracking feature).
+  brandColor              String? // #RRGGBB accent
+  brandLogoKey            String? // storage key (src/lib/storage.ts), served by /api/brand/[orgId]/logo
+  trackingMessage         String? // short note shown on every tracking page
+  allowCustomerRating     Boolean @default(true)
+  allowCustomerReschedule Boolean @default(true)
 
   // Platform account status (managed by FleetFlow super admins only).
   // SUSPENDED blocks sign-in and API use for the company's staff and drivers;
@@ -36,56 +46,88 @@ model Organization {
   suspendedReason String?
 
   // Subscription bookkeeping, recorded MANUALLY (no payment integration).
-  subscriptionStatus String    @default("TRIAL") // TRIAL | ACTIVE | PAST_DUE | CANCELLED
-  paidUntil          DateTime?
-  billingNotes       String?
+  subscriptionStatus   String    @default("TRIAL") // TRIAL | ACTIVE | PAST_DUE | CANCELLED
+  paidUntil            DateTime?
+  // End of the free trial (TRIAL only). Access rules: src/lib/subscription.ts —
+  // 7 days' grace after the trial or paidUntil ends, then read-only.
+  trialEndsAt          DateTime?
+  billingNotes         String?
   // Price snapshot taken when the plan was assigned: later plan price changes
   // don't alter what an existing subscriber pays (grandfathering).
   billingCycle         String    @default("MONTHLY") // MONTHLY | ANNUAL
   subscriptionPriceBdt Int? // agreed price per billing cycle; null = free (trial)
   planAssignedAt       DateTime  @default(now())
 
-  users         User[]
-  vehicles      Vehicle[]
-  deliveries    Delivery[]
-  auditLogs     AuditLog[]
-  notifications Notification[]
-  importBatches ImportBatch[]
+  users            User[]
+  vehicles         Vehicle[]
+  deliveries       Delivery[]
+  auditLogs        AuditLog[]
+  notifications    Notification[]
+  importBatches    ImportBatch[]
+  codSettlements   CodSettlement[]
+  invoices         Invoice[]
+  apiKeys          ApiKey[]
+  webhookEndpoints WebhookEndpoint[]
+  deliveryZones    DeliveryZone[]
+  driverLocations  DriverLocation[]
 }
 
 model User {
-  id             String       @id @default(cuid())
-  organizationId String
-  organization   Organization @relation(fields: [organizationId], references: [id])
-  name           String
-  email          String       @unique
-  passwordHash   String
-  role           String // ADMIN | DRIVER
-  active         Boolean      @default(true)
-  mustChangePassword Boolean  @default(false) // set when an admin creates/resets the password
-  lastLoginAt    DateTime?
-  createdAt      DateTime     @default(now())
-  updatedAt      DateTime     @updatedAt
+  id                 String       @id @default(cuid())
+  organizationId     String
+  organization       Organization @relation(fields: [organizationId], references: [id])
+  name               String
+  email              String       @unique
+  passwordHash       String
+  role               String // ADMIN | DISPATCHER | DRIVER
+  // The account that created the company. Other admins can't deactivate or reset it.
+  isOwner            Boolean      @default(false)
+  active             Boolean      @default(true)
+  mustChangePassword Boolean      @default(false) // set when an admin creates/resets the password
+  lastLoginAt        DateTime?
+  createdAt          DateTime     @default(now())
+  updatedAt          DateTime     @updatedAt
 
-  driverProfile DriverProfile?
-  sessions      Session[]
-  notifications Notification[]
-  assignments   Assignment[]      @relation("DriverAssignments")
-  events        DeliveryEvent[]   @relation("EventActor")
-  pods          ProofOfDelivery[] @relation("PodUploader")
+  driverProfile          DriverProfile?
+  sessions               Session[]
+  notifications          Notification[]
+  assignments            Assignment[]         @relation("DriverAssignments")
+  events                 DeliveryEvent[]      @relation("EventActor")
+  pods                   ProofOfDelivery[]    @relation("PodUploader")
+  codCollected           Delivery[]           @relation("CodCollector")
+  codSettlementsAsDriver CodSettlement[]      @relation("CodSettlementDriver")
+  passwordResets         PasswordResetToken[]
+  location               DriverLocation?
 
   @@index([organizationId, role])
 }
 
 model Session {
-  id        String   @id @default(cuid())
-  token     String   @unique
-  userId    String
-  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  expiresAt DateTime
-  createdAt DateTime @default(now())
+  id         String    @id @default(cuid())
+  token      String    @unique
+  userId     String
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt  DateTime
+  createdAt  DateTime  @default(now())
+  // Last request on this session (written at most once a minute) — idle timeout, src/lib/auth.ts.
+  lastSeenAt DateTime?
 
   @@index([userId])
+}
+
+// Single-use "forgot password" link. Only a SHA-256 of the emailed token is stored.
+model PasswordResetToken {
+  id        String    @id @default(cuid())
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  ip        String?
+  createdAt DateTime  @default(now())
+
+  @@index([userId])
+  @@index([expiresAt])
 }
 
 // Failure counters for login / sign-up / password throttling (src/lib/rate-limit.ts).
@@ -150,6 +192,51 @@ model Delivery {
   createdAt       DateTime     @default(now())
   updatedAt       DateTime     @updatedAt
 
+  // Cash on delivery, whole BDT. codAmount = what the recipient must pay (null = prepaid).
+  // The driver records what they actually collected when completing the delivery;
+  // the cash stays "in hand" until an admin records a handover (CodSettlement).
+  codAmount          Int?
+  codCollectedAmount Int?
+  codCollectedAt     DateTime?
+  codCollectedById   String?
+  codCollectedBy     User?          @relation("CodCollector", fields: [codCollectedById], references: [id])
+  codSettlementId    String?
+  codSettlement      CodSettlement? @relation(fields: [codSettlementId], references: [id])
+
+  // Where the delivery goes on the map. geoSource: GEOCODED (Barikoi) | PIN
+  // (dropped by staff) | DRIVER (GPS at proof of delivery) | API (sent by the caller).
+  // geocodeAttemptedAt is set even when lookup fails, so it isn't retried forever.
+  deliveryLat        Float?
+  deliveryLng        Float?
+  geoSource          String?
+  geocodeAttemptedAt DateTime?
+
+  // Stop order within the assigned driver's route (1 = first) and its estimate.
+  routeSeq       Int?
+  routePlannedAt DateTime?
+  plannedEta     DateTime?
+
+  // Delivery charge. Fee is calculated from the zone (src/lib/zones.ts) unless
+  // staff typed one in (feeOverridden). Whole BDT, charged to the sender.
+  zoneId         String?
+  zone           DeliveryZone? @relation(fields: [zoneId], references: [id], onDelete: SetNull)
+  weightKg       Float?
+  deliveryFeeBdt Int?
+  feeOverridden  Boolean       @default(false)
+
+  // Customer feedback from the tracking page (once, after delivery).
+  rating        Int? // 1–5
+  ratingComment String?
+  ratedAt       DateTime?
+
+  // Customer reschedule request from the tracking page.
+  rescheduleStatus       String? // PENDING | ACCEPTED | DECLINED
+  rescheduleRequestedFor DateTime? // start of the requested day/window (company timezone)
+  rescheduleWindow       String? // ANY | MORNING | AFTERNOON | EVENING
+  rescheduleNote         String?
+  rescheduleRequestedAt  DateTime?
+  rescheduleResolvedAt   DateTime?
+
   assignments Assignment[]
   events      DeliveryEvent[]
   pods        ProofOfDelivery[]
@@ -158,6 +245,77 @@ model Delivery {
   @@index([organizationId, createdAt])
   @@index([organizationId, expectedAt])
   @@index([organizationId, externalRef])
+  @@index([organizationId, codCollectedById, codSettlementId])
+  @@index([importBatchId])
+  @@index([codSettlementId])
+  @@index([organizationId, status, completedAt])
+  @@index([zoneId])
+  @@index([organizationId, rescheduleStatus])
+  @@index([organizationId, ratedAt])
+}
+
+// A delivery area with its charge. A delivery falls in the first active zone
+// (by sortOrder) whose area keywords appear in its address, else the default zone.
+model DeliveryZone {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+  name           String
+  areas          String[] // keywords matched against the delivery address, e.g. "Dhanmondi"
+  baseFeeBdt     Int
+  includedKg     Float        @default(1)
+  perExtraKgBdt  Int          @default(0)
+  codFeePercent  Float        @default(0) // % of the COD amount
+  codFeeMinBdt   Int          @default(0)
+  isDefault      Boolean      @default(false)
+  sortOrder      Int          @default(0)
+  active         Boolean      @default(true)
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  deliveries Delivery[]
+
+  @@unique([organizationId, name])
+  @@index([organizationId, active, sortOrder])
+}
+
+// A driver's LATEST position only — no history is kept. Sent by the driver app
+// only while they have a picked-up / in-transit job (src/lib/live-location.ts).
+model DriverLocation {
+  userId         String       @id
+  user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+  lat            Float
+  lng            Float
+  accuracyM      Float?
+  heading        Float?
+  speedKmh       Float?
+  recordedAt     DateTime
+  updatedAt      DateTime     @updatedAt
+
+  @@index([organizationId, recordedAt])
+}
+
+// A driver handing collected COD cash to the office. Every delivery it covers
+// points at it (Delivery.codSettlementId); amount = their codCollectedAmount sum.
+model CodSettlement {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+  driverId       String
+  driver         User         @relation("CodSettlementDriver", fields: [driverId], references: [id])
+  amount         Int
+  deliveryCount  Int
+  receivedById   String?
+  receivedByName String
+  note           String?
+  createdAt      DateTime     @default(now())
+
+  deliveries Delivery[]
+
+  @@index([organizationId, createdAt])
+  @@index([driverId, createdAt])
 }
 
 model Assignment {
@@ -181,34 +339,40 @@ model Assignment {
 
 // Append-only history — never update or delete rows here.
 model DeliveryEvent {
-  id        String   @id @default(cuid())
-  deliveryId String
-  delivery  Delivery @relation(fields: [deliveryId], references: [id], onDelete: Cascade)
-  actorId   String?
-  actor     User?    @relation("EventActor", fields: [actorId], references: [id])
-  actorName String?
-  eventType String // CREATED | ASSIGNED | UNASSIGNED | PICKED_UP | IN_TRANSIT | DELIVERED | FAILED | NOTE | CANCELLED | TRACKING_UPDATED | OVERRIDE
-  note      String?
-  customerVisible Boolean @default(false)
-  createdAt DateTime @default(now())
+  id              String   @id @default(cuid())
+  deliveryId      String
+  delivery        Delivery @relation(fields: [deliveryId], references: [id], onDelete: Cascade)
+  actorId         String?
+  actor           User?    @relation("EventActor", fields: [actorId], references: [id])
+  actorName       String?
+  eventType       String // CREATED | ASSIGNED | UNASSIGNED | PICKED_UP | IN_TRANSIT | DELIVERED | FAILED | NOTE | CANCELLED | TRACKING_UPDATED | OVERRIDE
+  note            String?
+  customerVisible Boolean  @default(false)
+  createdAt       DateTime @default(now())
 
   @@index([deliveryId, createdAt])
+  @@index([actorId])
 }
 
 model ProofOfDelivery {
-  id            String   @id @default(cuid())
-  deliveryId    String
-  delivery      Delivery @relation(fields: [deliveryId], references: [id], onDelete: Cascade)
-  fileKey       String // storage-relative path, file lives on disk — never in DB
-  fileName      String
-  mimeType      String
-  kind          String // SIGNATURE | PHOTO
-  recipientName String
-  capturedAt    DateTime @default(now())
-  uploadedById  String?
-  uploadedBy    User?    @relation("PodUploader", fields: [uploadedById], references: [id])
+  id                String   @id @default(cuid())
+  deliveryId        String
+  delivery          Delivery @relation(fields: [deliveryId], references: [id], onDelete: Cascade)
+  fileKey           String // storage-relative path, file lives on disk — never in DB
+  fileName          String
+  mimeType          String
+  kind              String // SIGNATURE | PHOTO
+  recipientName     String
+  capturedAt        DateTime @default(now())
+  // Where the driver was when capturing proof (browser geolocation; optional).
+  latitude          Float?
+  longitude         Float?
+  locationAccuracyM Float?
+  uploadedById      String?
+  uploadedBy        User?    @relation("PodUploader", fields: [uploadedById], references: [id])
 
   @@index([deliveryId])
+  @@index([uploadedById])
 }
 
 model Notification {
@@ -218,17 +382,19 @@ model Notification {
   userId         String? // null for emails to people without an account (e.g. delivery recipients)
   user           User?         @relation(fields: [userId], references: [id], onDelete: Cascade)
   type           String // NEW_ASSIGNMENT | UNASSIGNED | PICKED_UP | IN_TRANSIT | DELIVERED | FAILED | POD_UPLOADED | TRACKING
-  channel        String        @default("IN_APP") // IN_APP | EMAIL
+  channel        String        @default("IN_APP") // IN_APP | EMAIL | SMS
   title          String
   body           String
   recipientEmail String? // used for EMAIL channel
+  recipientPhone String? // used for SMS channel
   deliveryId     String?
   readAt         DateTime?
   createdAt      DateTime      @default(now())
 
-  // Email delivery state (channel=EMAIL): PENDING | SENDING | SENT | FAILED | SIMULATED
+  // Outbound delivery state (channel=EMAIL|SMS): PENDING | SENDING | SENT | FAILED | SIMULATED
   status            String?
   attempts          Int       @default(0)
+  lastAttemptAt     DateTime? // for automatic retry backoff
   sentAt            DateTime?
   lastError         String?
   providerMessageId String?
@@ -236,6 +402,8 @@ model Notification {
 
   @@index([userId, channel, readAt])
   @@index([organizationId, channel, createdAt])
+  @@index([deliveryId])
+  @@index([channel, status, createdAt])
 }
 
 // One row per committed CSV import; fileHash blocks importing the same file twice.
@@ -280,6 +448,112 @@ model AuditLog {
 }
 
 // ─────────────────────────────────────────────────────────────
+// Billing — invoices are issued automatically and paid MANUALLY (bKash, bank
+// transfer…). A company can report a payment; FleetFlow staff verify it and mark
+// the invoice paid, which extends paidUntil. Online gateways plug in via
+// src/lib/payments (provider "manual" for now).
+// ─────────────────────────────────────────────────────────────
+
+model Invoice {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+  number         String       @unique // human-friendly, e.g. FF-2026-00042
+  // Snapshot of what was billed (plan changes later don't rewrite old invoices).
+  planCode       String
+  planName       String
+  billingCycle   String // MONTHLY | ANNUAL
+  periodStart    DateTime
+  periodEnd      DateTime
+  amountBdt      Int
+  status         String       @default("OPEN") // OPEN | PAID | VOID
+  issuedAt       DateTime     @default(now())
+  dueAt          DateTime
+  paidAt         DateTime?
+  paymentMethod  String? // BKASH | NAGAD | ROCKET | BANK | CASH | OTHER | gateway provider id
+  paymentRef     String? // bKash TrxID, bank reference…
+  recordedById   String? // PlatformAdmin who marked it paid (null = gateway)
+  recordedByName String?
+  // Payment reported by the company, waiting for FleetFlow to verify.
+  reportedAt     DateTime?
+  reportedMethod String?
+  reportedRef    String?
+  reportedById   String?
+  reportedByName String?
+  voidReason     String?
+  notes          String?
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  @@unique([organizationId, periodStart]) // one invoice per billing period (cron is idempotent)
+  @@index([organizationId, issuedAt])
+  @@index([status, dueAt])
+}
+
+// ─────────────────────────────────────────────────────────────
+// Public API & webhooks (src/lib/api-keys.ts, src/lib/webhooks.ts)
+// ─────────────────────────────────────────────────────────────
+
+// The secret is shown once at creation; only its SHA-256 is stored.
+model ApiKey {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+  name           String
+  prefix         String // first characters of the key, shown in the UI to tell keys apart
+  keyHash        String       @unique
+  createdById    String?
+  createdByName  String?
+  lastUsedAt     DateTime?
+  revokedAt      DateTime?
+  createdAt      DateTime     @default(now())
+
+  @@index([organizationId, createdAt])
+}
+
+model WebhookEndpoint {
+  id                  String       @id @default(cuid())
+  organizationId      String
+  organization        Organization @relation(fields: [organizationId], references: [id])
+  url                 String
+  description         String?
+  // HMAC-SHA256 signing secret. Kept in plain text: it has to sign every payload.
+  secret              String
+  events              String[] // e.g. delivery.status_changed — see src/lib/webhooks.ts
+  active              Boolean      @default(true)
+  consecutiveFailures Int          @default(0) // auto-disabled after too many
+  disabledAt          DateTime?
+  disabledReason      String?
+  createdAt           DateTime     @default(now())
+  updatedAt           DateTime     @updatedAt
+
+  deliveries WebhookDelivery[]
+
+  @@index([organizationId])
+}
+
+// Outbox of webhook calls; retried with backoff by /api/cron/outbox.
+model WebhookDelivery {
+  id             String          @id @default(cuid())
+  endpointId     String
+  endpoint       WebhookEndpoint @relation(fields: [endpointId], references: [id], onDelete: Cascade)
+  organizationId String
+  event          String
+  payload        String // JSON body exactly as sent
+  status         String          @default("PENDING") // PENDING | SENDING | SUCCEEDED | FAILED
+  attempts       Int             @default(0)
+  nextAttemptAt  DateTime        @default(now())
+  lastAttemptAt  DateTime?
+  responseStatus Int?
+  lastError      String?
+  createdAt      DateTime        @default(now())
+
+  @@index([status, nextAttemptAt])
+  @@index([endpointId, createdAt])
+  @@index([organizationId, createdAt])
+}
+
+// ─────────────────────────────────────────────────────────────
 // Platform (super admin) — deliberately separate from tenant users.
 // No User field grants platform access; platform admins are created
 // only by scripts/create-super-admin.mjs (no public registration).
@@ -296,16 +570,26 @@ model PlatformAdmin {
   createdAt          DateTime  @default(now())
   updatedAt          DateTime  @updatedAt
 
+  // Two-factor login (TOTP authenticator app, src/lib/totp.ts). Required for every
+  // super admin: enrolment happens at the next sign-in while totpEnabledAt is null.
+  totpSecret      String? // base32; set during enrolment, active once totpEnabledAt is set
+  totpEnabledAt   DateTime?
+  totpLastStep    Int? // last accepted 30-second step (blocks replaying a code)
+  totpBackupCodes String[] // SHA-256 hashes of unused one-time backup codes
+
   sessions PlatformSession[]
 }
 
 model PlatformSession {
-  id        String        @id @default(cuid())
-  token     String        @unique // SHA-256 of the cookie token
-  adminId   String
-  admin     PlatformAdmin @relation(fields: [adminId], references: [id], onDelete: Cascade)
-  expiresAt DateTime
-  createdAt DateTime      @default(now())
+  id         String        @id @default(cuid())
+  token      String        @unique // SHA-256 of the cookie token
+  adminId    String
+  admin      PlatformAdmin @relation(fields: [adminId], references: [id], onDelete: Cascade)
+  expiresAt  DateTime
+  createdAt  DateTime      @default(now())
+  // Password accepted but no authenticator code yet: only the 2FA endpoints accept this session.
+  mfaPending Boolean       @default(false)
+  lastSeenAt DateTime? // idle timeout (src/lib/platform-auth.ts)
 
   @@index([adminId])
 }

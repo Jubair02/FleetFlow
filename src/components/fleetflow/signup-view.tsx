@@ -281,7 +281,7 @@ export function SignupView({ onSignIn }: { onSignIn: () => void }) {
           <h2 id="signup-plans-heading" className="text-lg font-semibold tracking-tight">
             Plans
           </h2>
-          <p className="mt-1 text-sm text-muted-foreground">Switch to the plan that fits whenever you&apos;re ready — there&apos;s nothing to pay online.</p>
+          <p className="mt-1 text-sm text-muted-foreground">Switch to the plan that fits whenever you&apos;re ready — pay by bKash, Nagad or bank transfer.</p>
           <div className="mt-6">
             <PricingTable />
           </div>

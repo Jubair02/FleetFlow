@@ -1,6 +1,6 @@
 import { Prisma } from "@prisma/client";
 import { db } from "@/lib/db";
-import { createSession, hashPassword } from "@/lib/auth";
+import { createSession, hashPassword, SESSION_ORG_SELECT } from "@/lib/auth";
 import { ApiError, fail, ok, readJson } from "@/lib/api-helpers";
 import { signupSchema, firstError } from "@/lib/validation";
 import { recordFailure, retryAfter } from "@/lib/rate-limit";
@@ -9,6 +9,7 @@ import { TX_OPTIONS } from "@/lib/delivery";
 import { auditData } from "@/lib/notify";
 import { DEFAULT_TIMEZONE } from "@/lib/timezone";
 import { getDefaultPlan, listPrice } from "@/lib/plans";
+import { trialEndFrom } from "@/lib/subscription";
 
 // Self-service sign-up is on by default; set ALLOW_SIGNUP=false to close it.
 function signupEnabled(): boolean {
@@ -53,6 +54,7 @@ export async function POST(req: Request) {
           data: {
             name: data.companyName,
             plan: plan.code,
+            trialEndsAt: trialEndFrom(new Date()),
             billingCycle: "MONTHLY",
             subscriptionPriceBdt,
             planAssignedAt: new Date(),
@@ -68,6 +70,7 @@ export async function POST(req: Request) {
             email: data.email,
             passwordHash,
             role: "ADMIN",
+            isOwner: true, // the sign-up account owns the company
             lastLoginAt: new Date(),
           },
         });
@@ -91,7 +94,7 @@ export async function POST(req: Request) {
     await createSession(userId);
     const user = await db.user.findUniqueOrThrow({
       where: { id: userId },
-      include: { driverProfile: true, organization: { select: { id: true, name: true } } },
+      include: { driverProfile: true, organization: { select: SESSION_ORG_SELECT } },
     });
     return ok({ user: sessionUserDto(user) }, 201);
   } catch (e) {

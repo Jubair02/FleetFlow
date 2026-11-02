@@ -39,6 +39,16 @@ export interface DeliveryDTO {
   completedAt: string | null;
   createdAt: string;
   updatedAt: string;
+  /** Cash on delivery (whole BDT); null = prepaid. */
+  codAmount: number | null;
+  codCollectedAmount: number | null;
+  codCollectedAt: string | null;
+  /** True once the collected cash was handed over to the office. */
+  codSettled: boolean;
+  /** Stop number in the assigned driver's planned route (1 = first); null = not planned. */
+  routeSeq: number | null;
+  /** Planned arrival estimate (docs/ROUTES.md); null = not planned / no map location. */
+  plannedEta: string | null;
   assignment: {
     id: string;
     driverId: string;
@@ -49,11 +59,46 @@ export interface DeliveryDTO {
     assignedAt: string;
   } | null;
   podCount: number;
+  /** Map point and who set it (GEOCODED | PIN | DRIVER | API); null = not located yet. */
+  location: { lat: number; lng: number; source: string | null } | null;
+  /** Delivery charge (docs/ZONES.md) — staff views only; null for drivers. */
+  charge: DeliveryChargeDTO | null;
+  /** Customer rating + reschedule request from the tracking page — staff views only; null for drivers. */
+  customer: DeliveryCustomerFeedbackDTO | null;
 }
+
+/** docs/CUSTOMER-EXPERIENCE.md */
+export interface DeliveryCustomerFeedbackDTO {
+  rating: { score: number; comment: string | null; ratedAt: string | null } | null;
+  reschedule: {
+    status: string;
+    /** Start of the requested day / window (ISO). */
+    requestedFor: string | null;
+    window: string | null;
+    note: string | null;
+    requestedAt: string | null;
+    resolvedAt: string | null;
+  } | null;
+}
+
+export interface DeliveryChargeDTO {
+  zoneId: string | null;
+  /** null when the zone was deleted or the query didn't load it. */
+  zoneName: string | null;
+  weightKg: number | null;
+  /** Whole BDT; null = no zone matched / no price. */
+  deliveryFeeBdt: number | null;
+  /** True = typed by staff, never recalculated. */
+  feeOverridden: boolean;
+}
+
+/** Include for queries whose rows go to toDeliveryDTO (the zone's name). */
+export const DELIVERY_ZONE_INCLUDE = { zone: { select: { name: true } } } as const;
 
 type DeliveryWithRefs = Delivery & {
   assignments: (Assignment & { driver: User; vehicle: Vehicle | null })[];
   _count?: { pods: number };
+  zone?: { name: string } | null;
 };
 
 export function toDeliveryDTO(d: DeliveryWithRefs, includeToken: boolean): DeliveryDTO {
@@ -77,6 +122,12 @@ export function toDeliveryDTO(d: DeliveryWithRefs, includeToken: boolean): Deliv
     completedAt: d.completedAt ? d.completedAt.toISOString() : null,
     createdAt: d.createdAt.toISOString(),
     updatedAt: d.updatedAt.toISOString(),
+    codAmount: d.codAmount,
+    codCollectedAmount: d.codCollectedAmount,
+    codCollectedAt: d.codCollectedAt ? d.codCollectedAt.toISOString() : null,
+    codSettled: !!d.codSettlementId,
+    routeSeq: d.routeSeq ?? null,
+    plannedEta: d.plannedEta ? d.plannedEta.toISOString() : null,
     assignment:
       active && active.vehicle
         ? {
@@ -90,6 +141,25 @@ export function toDeliveryDTO(d: DeliveryWithRefs, includeToken: boolean): Deliv
           }
         : null,
     podCount: d._count?.pods ?? 0,
+    location: d.deliveryLat != null && d.deliveryLng != null ? { lat: d.deliveryLat, lng: d.deliveryLng, source: d.geoSource ?? null } : null,
+    charge: includeToken
+      ? { zoneId: d.zoneId, zoneName: d.zone?.name ?? null, weightKg: d.weightKg, deliveryFeeBdt: d.deliveryFeeBdt, feeOverridden: d.feeOverridden }
+      : null,
+    customer: includeToken
+      ? {
+          rating: d.rating != null ? { score: d.rating, comment: d.ratingComment ?? null, ratedAt: d.ratedAt?.toISOString() ?? null } : null,
+          reschedule: d.rescheduleStatus
+            ? {
+                status: d.rescheduleStatus,
+                requestedFor: d.rescheduleRequestedFor?.toISOString() ?? null,
+                window: d.rescheduleWindow ?? null,
+                note: d.rescheduleNote ?? null,
+                requestedAt: d.rescheduleRequestedAt?.toISOString() ?? null,
+                resolvedAt: d.rescheduleResolvedAt?.toISOString() ?? null,
+              }
+            : null,
+        }
+      : null,
   };
 }
 

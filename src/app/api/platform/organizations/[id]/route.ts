@@ -67,6 +67,7 @@ export async function GET(_req: Request, { params }: Params) {
         plan: org.plan,
         subscriptionStatus: org.subscriptionStatus as SubscriptionStatus,
         paidUntil: org.paidUntil?.toISOString() ?? null,
+        trialEndsAt: org.trialEndsAt?.toISOString() ?? null,
         billingNotes: org.billingNotes,
         billingCycle,
         subscriptionPriceBdt: org.subscriptionPriceBdt,
@@ -173,14 +174,15 @@ export async function PATCH(req: Request, { params }: Params) {
           const next = {
             subscriptionStatus: input.subscriptionStatus,
             paidUntil: parsePaidUntil(input.paidUntil),
+            trialEndsAt: input.trialEndsAt === undefined ? org.trialEndsAt : parsePaidUntil(input.trialEndsAt),
             billingNotes: input.billingNotes ? input.billingNotes : null,
           };
           await tx.organization.update({ where: { id }, data: next });
           platformAction = "SUBSCRIPTION_UPDATED";
           tenantAction = "SUBSCRIPTION_UPDATED";
           detail = {
-            from: { subscriptionStatus: org.subscriptionStatus, paidUntil: org.paidUntil?.toISOString() ?? null },
-            to: { subscriptionStatus: next.subscriptionStatus, paidUntil: next.paidUntil?.toISOString() ?? null },
+            from: { subscriptionStatus: org.subscriptionStatus, paidUntil: org.paidUntil?.toISOString() ?? null, trialEndsAt: org.trialEndsAt?.toISOString() ?? null },
+            to: { subscriptionStatus: next.subscriptionStatus, paidUntil: next.paidUntil?.toISOString() ?? null, trialEndsAt: next.trialEndsAt?.toISOString() ?? null },
             billingNotesChanged: (org.billingNotes ?? null) !== next.billingNotes,
           };
           break;

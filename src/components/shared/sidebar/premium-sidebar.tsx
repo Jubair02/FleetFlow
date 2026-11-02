@@ -20,6 +20,8 @@ export interface SidebarNavItem {
   /** Screen-reader noun for the badge, e.g. "unread". */
   badgeLabel?: string;
   active?: boolean;
+  /** When set the item renders as a link (open in new tab works); a plain click still calls onSelect. */
+  href?: string;
   onSelect: () => void;
 }
 
@@ -134,6 +136,44 @@ function NavItem({ item }: { item: SidebarNavItem }) {
   const Icon = item.icon;
   const count = item.badge && item.badge > 0 ? item.badge : 0;
   const a11yLabel = count ? `${item.label}, ${count} ${item.badgeLabel ?? "new"}` : item.label;
+  const className = cn(
+    "group/item relative flex min-h-11 w-full items-center gap-3 rounded-xl px-3 text-left text-sm font-medium",
+    "motion-safe:transition-[background-color,color,box-shadow] motion-safe:duration-200",
+    FOCUS_RING,
+    item.active
+      ? "bg-(--ff-sidebar-accent) text-white shadow-[inset_0_1px_0_rgb(255_255_255/0.14),0_10px_24px_-12px_var(--ff-sidebar-accent-shadow)]"
+      : "text-(--ff-sidebar-fg) hover:bg-(--ff-sidebar-hover) hover:text-white motion-safe:active:scale-[0.98]"
+  );
+  const content = (
+    <>
+      <span className="relative flex shrink-0 items-center justify-center" aria-hidden>
+        <Icon className={cn("size-5", item.active ? "text-white" : "text-(--ff-sidebar-muted) group-hover/item:text-white")} strokeWidth={1.9} />
+        {count > 0 && (
+          <span
+            className={cn(
+              "absolute -top-1.5 -right-2 flex h-4 min-w-4 items-center justify-center rounded-full bg-rose-600 px-1 text-[9px] font-bold leading-none text-white ring-2 ring-(--ff-sidebar-bg)",
+              railOnly
+            )}
+          >
+            {formatBadge(count)}
+          </span>
+        )}
+      </span>
+      <span className={cn("min-w-0 flex-1 truncate", fullOnly)}>{item.label}</span>
+      {count > 0 && (
+        <span
+          className={cn(
+            "ml-auto flex h-5 min-w-5 shrink-0 items-center justify-center rounded-full bg-rose-600 px-1.5 text-[11px] font-semibold tabular-nums text-white",
+            item.active && "ring-1 ring-white/30",
+            fullOnly
+          )}
+          aria-hidden
+        >
+          {formatBadge(count)}
+        </span>
+      )}
+    </>
+  );
 
   return (
     <RailTooltip
@@ -144,47 +184,26 @@ function NavItem({ item }: { item: SidebarNavItem }) {
         </span>
       }
     >
-      <button
-        type="button"
-        onClick={item.onSelect}
-        aria-label={a11yLabel}
-        aria-current={item.active ? "page" : undefined}
-        className={cn(
-          "group/item relative flex min-h-11 w-full items-center gap-3 rounded-xl px-3 text-left text-sm font-medium",
-          "motion-safe:transition-[background-color,color,box-shadow] motion-safe:duration-200",
-          FOCUS_RING,
-          item.active
-            ? "bg-(--ff-sidebar-accent) text-white shadow-[inset_0_1px_0_rgb(255_255_255/0.14),0_10px_24px_-12px_var(--ff-sidebar-accent-shadow)]"
-            : "text-(--ff-sidebar-fg) hover:bg-(--ff-sidebar-hover) hover:text-white motion-safe:active:scale-[0.98]"
-        )}
-      >
-        <span className="relative flex shrink-0 items-center justify-center" aria-hidden>
-          <Icon className={cn("size-5", item.active ? "text-white" : "text-(--ff-sidebar-muted) group-hover/item:text-white")} strokeWidth={1.9} />
-          {count > 0 && (
-            <span
-              className={cn(
-                "absolute -top-1.5 -right-2 flex h-4 min-w-4 items-center justify-center rounded-full bg-rose-600 px-1 text-[9px] font-bold leading-none text-white ring-2 ring-(--ff-sidebar-bg)",
-                railOnly
-              )}
-            >
-              {formatBadge(count)}
-            </span>
-          )}
-        </span>
-        <span className={cn("min-w-0 flex-1 truncate", fullOnly)}>{item.label}</span>
-        {count > 0 && (
-          <span
-            className={cn(
-              "ml-auto flex h-5 min-w-5 shrink-0 items-center justify-center rounded-full bg-rose-600 px-1.5 text-[11px] font-semibold tabular-nums text-white",
-              item.active && "ring-1 ring-white/30",
-              fullOnly
-            )}
-            aria-hidden
-          >
-            {formatBadge(count)}
-          </span>
-        )}
-      </button>
+      {item.href ? (
+        <a
+          href={item.href}
+          onClick={(e) => {
+            // Modified / middle clicks keep the browser's link behaviour (new tab, new window…).
+            if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+            e.preventDefault();
+            item.onSelect();
+          }}
+          aria-label={a11yLabel}
+          aria-current={item.active ? "page" : undefined}
+          className={className}
+        >
+          {content}
+        </a>
+      ) : (
+        <button type="button" onClick={item.onSelect} aria-label={a11yLabel} aria-current={item.active ? "page" : undefined} className={className}>
+          {content}
+        </button>
+      )}
     </RailTooltip>
   );
 }

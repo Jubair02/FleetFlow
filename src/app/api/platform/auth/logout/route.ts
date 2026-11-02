@@ -8,7 +8,8 @@ import { destroyPlatformSession, getPlatformAdmin, platformAuditData } from "@/l
 // live session produces an audit row.
 export async function POST(req: Request) {
   try {
-    const admin = await getPlatformAdmin();
+    // Also signs out a session still waiting for its authenticator code.
+    const admin = await getPlatformAdmin({ allowMfaPending: true });
     await destroyPlatformSession();
     if (admin) {
       await db.platformAuditLog.create({

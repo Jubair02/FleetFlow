@@ -1,6 +1,8 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { useEffect, useState } from "react";
+import { useCachedData } from "@/lib/api-client";
+import { revalidateData, type CacheKeyMatcher } from "@/lib/data-cache";
 
 // ─────────────────────────────────────────────────────────────
 // Platform console API client — deliberately separate from
@@ -70,24 +72,12 @@ export const platformApi = {
   delete: <T>(path: string, body?: unknown) => platformFetch<T>(path, { method: "DELETE", body: JSON.stringify(body ?? {}) }),
 };
 
-// ── Global refresh signal (bump after any mutation) ──────────
+// ── Cached data (shared hook with the company app) ───────────
 
-let refreshKey = 0;
-const refreshListeners = new Set<Listener>();
-
-export function bumpPlatformData() {
-  refreshKey++;
-  refreshListeners.forEach((l) => l());
+/** Refetch platform data after a mutation (every /api/platform/* request, or the matching ones). */
+export function bumpPlatformData(match: CacheKeyMatcher = "/api/platform") {
+  void revalidateData(match);
 }
-
-function subscribeRefresh(l: Listener) {
-  refreshListeners.add(l);
-  return () => {
-    refreshListeners.delete(l);
-  };
-}
-
-const getRefreshKey = () => refreshKey;
 
 /** Build "/path?a=1&b=2", skipping empty values. */
 export function withQuery(path: string, params: Record<string, string | number | null | undefined>): string {
@@ -100,53 +90,15 @@ export function withQuery(path: string, params: Record<string, string | number |
   return s ? `${path}?${s}` : path;
 }
 
+const fetchPlatform = <T,>(url: string) => platformFetch<T>(url);
+
 /**
- * Fetch platform data; refetches when the URL changes or after bumpPlatformData().
- * Stale responses (an older URL answering late) are discarded.
+ * Fetch platform data — the company app's cached hook (src/lib/api-client.ts)
+ * with this file's fetcher, so a 401 returns to sign-in without touching the
+ * company store. Refetches when the URL changes or after bumpPlatformData().
  */
 export function usePlatformData<T>(url: string | null) {
-  const [data, setData] = useState<T | null>(null);
-  const [loading, setLoading] = useState<boolean>(!!url);
-  const [error, setError] = useState<string | null>(null);
-  const [loadedUrl, setLoadedUrl] = useState<string | null>(null);
-  const key = useSyncExternalStore(subscribeRefresh, getRefreshKey, getRefreshKey);
-  const requestId = useRef(0);
-
-  useEffect(() => {
-    return () => {
-      requestId.current++;
-    };
-  }, []);
-
-  const load = useCallback(async () => {
-    const id = ++requestId.current;
-    if (!url) {
-      setLoading(false);
-      return;
-    }
-    setLoading(true);
-    try {
-      const result = await platformFetch<T>(url);
-      if (id !== requestId.current) return;
-      setData(result);
-      setError(null);
-      setLoadedUrl(url);
-    } catch (e) {
-      if (id !== requestId.current) return;
-      setError(e instanceof Error ? e.message : "Failed to load");
-      setLoadedUrl(url);
-    } finally {
-      if (id === requestId.current) setLoading(false);
-    }
-  }, [url]);
-
-  useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- fetch-on-change is this hook's purpose
-    load();
-  }, [load, key]);
-
-  const pending = !!url && loadedUrl !== url;
-  return { data, loading: loading || pending, error: pending ? null : error, reload: load };
+  return useCachedData<T>(url, fetchPlatform<T>);
 }
 
 /** Value that only updates after `delay` ms without changes (search inputs). */

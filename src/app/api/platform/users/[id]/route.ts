@@ -57,7 +57,7 @@ export async function PATCH(req: Request, { params }: Params) {
       } else if (action === "activate") {
         changed = !target.active;
         if (changed) {
-          await assertPlanLimit(tx, orgId, resourceForRole(target.role));
+          await assertPlanLimit(tx, orgId, resourceForRole(target.role), 1, { enforceSubscription: false });
           await tx.user.update({ where: { id: target.id }, data: { active: true } });
         }
       } else if (action === "reset-password") {

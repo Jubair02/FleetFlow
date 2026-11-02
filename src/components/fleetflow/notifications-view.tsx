@@ -11,6 +11,7 @@ import {
   Image as ImageIcon,
   Info,
   Mail,
+  MessageSquare,
   PackageCheck,
   RefreshCw,
   RotateCw,
@@ -36,6 +37,7 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { api, useApiData } from "@/lib/api-client";
 import { formatDateTime, timeAgo } from "@/lib/format";
+import { isStaffRole } from "@/lib/roles";
 import type { NotificationItem } from "@/lib/types";
 import { goToDelivery, useAppStore } from "@/store/app-store";
 import { cn } from "@/lib/utils";
@@ -190,6 +192,9 @@ function InAppList({
 type EmailRowStatus = "PENDING" | "SENDING" | "SENT" | "FAILED" | "SIMULATED";
 
 interface EmailOutboxItem extends NotificationItem {
+  /** "EMAIL" or "SMS" (missing on responses from before SMS existed) */
+  channel?: string;
+  recipientPhone?: string | null;
   status: EmailRowStatus;
   attempts: number;
   sentAt: string | null;
@@ -203,9 +208,16 @@ interface EmailStatusInfo {
   warning: string | null;
 }
 
+interface SmsStatusInfo {
+  provider: "bulksmsbd" | "console";
+  configured: boolean;
+  warning: string | null;
+}
+
 interface EmailOutboxResponse {
   items: EmailOutboxItem[];
   emailStatus: EmailStatusInfo;
+  smsStatus?: SmsStatusInfo;
   maxAttempts: number;
   failedRetryable: number;
 }
@@ -272,6 +284,27 @@ function EmailModeBanner({ status }: { status: EmailStatusInfo | null }) {
   );
 }
 
+/** One line on how customer SMS are sent (the outbox also holds SMS rows). */
+function SmsModeNote({ status }: { status: SmsStatusInfo | null }) {
+  if (!status) return null;
+  return (
+    <p className="flex items-start gap-1.5 text-sm text-muted-foreground" role="status">
+      <MessageSquare className="mt-0.5 size-4 shrink-0" aria-hidden />
+      <span>
+        {status.provider === "bulksmsbd"
+          ? "Customer SMS are sent via BulkSMSBD."
+          : "Customer SMS are simulated — set SMS_PROVIDER=bulksmsbd with BULKSMSBD_API_KEY and BULKSMSBD_SENDER_ID to send them."}
+        {status.warning && <span className="block text-amber-700 dark:text-amber-400">{status.warning}</span>}
+      </span>
+    </p>
+  );
+}
+
+/** "+880 1712-345678" style display for a canonical 8801XXXXXXXXX number. */
+function formatPhone(phone: string): string {
+  return /^8801\d{9}$/.test(phone) ? `+880 ${phone.slice(3, 7)}-${phone.slice(7)}` : phone;
+}
+
 function EmailOutbox({
   items,
   maxAttempts,
@@ -309,9 +342,9 @@ function EmailOutbox({
     return (
       <Card className="p-10 text-center">
         <Mail className="mx-auto size-10 text-muted-foreground/50" aria-hidden />
-        <h3 className="mt-4 font-medium">No emails yet</h3>
+        <h3 className="mt-4 font-medium">No messages yet</h3>
         <p className="mt-1 text-sm text-muted-foreground">
-          No emails yet — assign a delivery or complete one to trigger alerts.
+          No messages yet — assign a delivery or complete one to trigger alerts.
         </p>
       </Card>
     );
@@ -323,7 +356,7 @@ function EmailOutbox({
         <TableHeader>
           <TableRow className="bg-muted/50">
             <TableHead>To</TableHead>
-            <TableHead>Subject</TableHead>
+            <TableHead>Subject / message</TableHead>
             <TableHead>Status</TableHead>
             <TableHead>Created</TableHead>
             <TableHead>Type</TableHead>
@@ -337,10 +370,17 @@ function EmailOutbox({
             const meta = NOTIF_META[n.type] ?? DEFAULT_META;
             const st = EMAIL_STATUS_META[n.status] ?? EMAIL_STATUS_META.PENDING;
             const canRetry = n.status === "FAILED" && n.attempts < maxAttempts;
+            const isSms = n.channel === "SMS";
+            const to = isSms ? (n.recipientPhone ? formatPhone(n.recipientPhone) : null) : n.recipientEmail;
             return (
               <TableRow key={n.id}>
                 <TableCell className="font-mono text-xs whitespace-nowrap">
-                  {n.recipientEmail ?? "—"}
+                  {isSms && (
+                    <Badge variant="outline" className="mr-1.5 font-sans text-[10px]">
+                      SMS
+                    </Badge>
+                  )}
+                  {to ?? "—"}
                 </TableCell>
                 <TableCell className="max-w-[260px]">
                   <p className="truncate font-medium">{n.title}</p>
@@ -385,7 +425,7 @@ function EmailOutbox({
                       size="sm"
                       disabled={retrying !== null}
                       onClick={() => onRetryEmail(n.id)}
-                      aria-label={`Retry email to ${n.recipientEmail ?? "recipient"}`}
+                      aria-label={`Retry ${isSms ? "SMS" : "email"} to ${to ?? "recipient"}`}
                     >
                       <RotateCw className={cn(retrying === n.id && "animate-spin")} aria-hidden /> Retry
                     </Button>
@@ -407,14 +447,15 @@ function retryMessage(r: RetryResponse): string {
   if (r.simulated) parts.push(`${r.simulated} simulated`);
   if (r.failed) parts.push(`${r.failed} failed again`);
   if (r.skipped) parts.push(`${r.skipped} skipped`);
-  return `Retried ${r.attempted} email${r.attempted === 1 ? "" : "s"}: ${parts.join(", ") || "done"}`;
+  return `Retried ${r.attempted} message${r.attempted === 1 ? "" : "s"}: ${parts.join(", ") || "done"}`;
 }
 
 // ── main view ────────────────────────────────────────────────
 
 export function NotificationsView() {
   const session = useAppStore((s) => s.session);
-  const isAdmin = session?.role === "ADMIN";
+  // admins and dispatchers see the outbox; drivers only their in-app list
+  const isAdmin = isStaffRole(session?.role);
 
   const inApp = useApiData<{ items: NotificationItem[]; unread: number }>("/api/notifications");
   const email = useApiData<EmailOutboxResponse>(
@@ -434,7 +475,7 @@ export function NotificationsView() {
       if (r.failed > 0) toast.error(retryMessage(r));
       else toast.success(retryMessage(r));
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Failed to retry emails");
+      toast.error(err instanceof Error ? err.message : "Failed to retry messages");
     } finally {
       setRetrying(null);
       email.reload();
@@ -449,7 +490,7 @@ export function NotificationsView() {
     try {
       await api.post("/api/notifications/read", { all: true });
       toast.success("All notifications marked as read");
-      useAppStore.getState().bump(); // refreshes this list and the header bell
+      useAppStore.getState().bump("/api/notifications"); // refreshes this list and the header bell
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Failed to mark notifications");
     } finally {
@@ -462,14 +503,14 @@ export function NotificationsView() {
       // Fire-and-forget: navigation must not wait on (or fail with) marking read.
       api
         .post("/api/notifications/read", { ids: [n.id] })
-        .then(() => useAppStore.getState().bump())
+        .then(() => useAppStore.getState().bump("/api/notifications"))
         .catch(() => {
           /* stays unread — non-critical */
         });
     }
     if (!n.deliveryId) return;
     const store = useAppStore.getState();
-    if (store.session?.role === "ADMIN") {
+    if (isStaffRole(store.session?.role)) {
       goToDelivery(n.deliveryId);
     } else {
       store.focusDelivery(n.deliveryId);
@@ -530,16 +571,17 @@ export function NotificationsView() {
             )}
           </TabsTrigger>
           <TabsTrigger value="email" className="gap-1.5">
-            <Mail aria-hidden /> Email outbox
+            <Mail aria-hidden /> Outbox
           </TabsTrigger>
         </TabsList>
         <TabsContent value="in-app">{inAppList}</TabsContent>
         <TabsContent value="email" className="space-y-3">
           <EmailModeBanner status={email.data?.emailStatus ?? null} />
+          <SmsModeNote status={email.data?.smsStatus ?? null} />
           {failedRetryable > 0 && (
             <div className="flex flex-wrap items-center justify-between gap-3">
               <p className="text-sm text-muted-foreground">
-                {failedRetryable} failed email{failedRetryable === 1 ? "" : "s"} can be retried.
+                {failedRetryable} failed message{failedRetryable === 1 ? "" : "s"} can be retried.
               </p>
               <Button
                 variant="outline"

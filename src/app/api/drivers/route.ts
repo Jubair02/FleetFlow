@@ -2,7 +2,7 @@ import { Prisma } from "@prisma/client";
 import { db } from "@/lib/db";
 import { hashPassword } from "@/lib/auth";
 import { assertPlanLimit } from "@/lib/plans";
-import { ApiError, fail, ok, readJson, requireAdmin } from "@/lib/api-helpers";
+import { ApiError, fail, ok, readJson, requireStaff } from "@/lib/api-helpers";
 import { createDriverSchema, firstError } from "@/lib/validation";
 import { TX_OPTIONS } from "@/lib/delivery";
 import { auditData } from "@/lib/notify";
@@ -11,7 +11,7 @@ import { toDriverDTO } from "@/lib/serializers";
 // GET /api/drivers — org drivers with workload (admin)
 export async function GET() {
   try {
-    const user = await requireAdmin();
+    const user = await requireStaff();
     const orgDriver = { driver: { organizationId: user.organizationId } };
 
     const [drivers, activeCounts, outcomeCounts] = await Promise.all([
@@ -58,7 +58,7 @@ export async function GET() {
 // POST /api/drivers — create driver account (admin)
 export async function POST(req: Request) {
   try {
-    const user = await requireAdmin();
+    const user = await requireStaff();
     const parsed = createDriverSchema.safeParse(await readJson<unknown>(req));
     if (!parsed.success) throw new ApiError(400, firstError(parsed.error));
     const data = parsed.data;

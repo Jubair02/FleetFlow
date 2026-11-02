@@ -1,12 +1,14 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { Building2, CreditCard, Users } from "lucide-react";
+import { Building2, Code2, CreditCard, MapPinned, Palette, Users } from "lucide-react";
 
 import { PlanPanel } from "@/components/fleetflow/plan-panel";
 import { CompanyTab, PROFILE_DETAILS } from "@/components/fleetflow/settings/company-tab";
+import { DevelopersTab } from "@/components/fleetflow/settings/developers-tab";
 import { SettingsHero, type SettingsNavItem } from "@/components/fleetflow/settings/hero";
 import { TeamTab } from "@/components/fleetflow/settings/team-tab";
+import { TrackingTab } from "@/components/fleetflow/settings/tracking-tab";
+import { ZonesTab } from "@/components/fleetflow/settings/zones-tab";
 import { ENTER_MOTION } from "@/components/fleetflow/driver/job-utils";
 import { Tabs, TabsContent } from "@/components/ui/tabs";
 import { useApiData } from "@/lib/api-client";
@@ -20,19 +22,10 @@ function teamSummary(staff: StaffList): string {
 }
 
 export function SettingsView() {
-  const preset = useAppStore((s) => s.settingsTabPreset);
-  const [tab, setTab] = useState<SettingsTab>(preset ?? "company");
-  // goToSettings("plan") while Settings is already open: follow the new preset.
-  const [seenPreset, setSeenPreset] = useState(preset);
-  if (preset !== seenPreset) {
-    setSeenPreset(preset);
-    if (preset) setTab(preset);
-  }
-
-  // The preset is one-shot: consume it once this view has picked it up.
-  useEffect(() => {
-    if (preset) useAppStore.getState().setSettingsTabPreset(null);
-  }, [preset]);
+  // The tab lives in the store so it is part of the address (/settings/<tab>);
+  // goToSettings("plan") and Back/Forward switch it even while Settings is open.
+  const tab = useAppStore((s) => s.settingsTab);
+  const setTab = useAppStore((s) => s.setSettingsTab);
 
   // Fetched once here: the hero shows live summaries and the tabs render the same data.
   const org = useApiData<OrgSettingsResponse>("/api/org");
@@ -50,6 +43,9 @@ export function SettingsView() {
     },
     { value: "team", label: "Team", icon: Users, summary: staff.data ? teamSummary(staff.data) : null },
     { value: "plan", label: "Plan & billing", icon: CreditCard, summary: planName ? `${planName} · usage & limits` : null },
+    { value: "developers", label: "API & webhooks", icon: Code2, summary: "Connect your store or systems" },
+    { value: "tracking", label: "Tracking page", icon: Palette, summary: "Branding, ratings & rescheduling" },
+    { value: "zones", label: "Zones & charges", icon: MapPinned, summary: "Delivery areas and prices" },
   ];
 
   return (
@@ -63,6 +59,15 @@ export function SettingsView() {
       </TabsContent>
       <TabsContent value="plan" className={ENTER_MOTION}>
         <PlanPanel />
+      </TabsContent>
+      <TabsContent value="developers" className={ENTER_MOTION}>
+        <DevelopersTab />
+      </TabsContent>
+      <TabsContent value="tracking" className={ENTER_MOTION}>
+        <TrackingTab />
+      </TabsContent>
+      <TabsContent value="zones" className={ENTER_MOTION}>
+        <ZonesTab />
       </TabsContent>
     </Tabs>
   );

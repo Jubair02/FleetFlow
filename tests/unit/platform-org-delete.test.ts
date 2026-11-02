@@ -17,6 +17,13 @@ const tx = vi.hoisted(() => {
     deliveryEvent: model(),
     assignment: model(),
     delivery: model(),
+    codSettlement: model(),
+    invoice: model(),
+    webhookDelivery: model(),
+    webhookEndpoint: model(),
+    apiKey: model(),
+    deliveryZone: model(),
+    driverLocation: model(),
     importBatch: model(),
     driverProfile: model(),
     vehicle: model(),
@@ -36,6 +43,7 @@ const db = vi.hoisted(() => {
     deliveryEvent: model(),
     assignment: model(),
     delivery: model(),
+    codSettlement: model(),
     importBatch: model(),
     driverProfile: model(),
     vehicle: model(),
@@ -201,6 +209,9 @@ describe("DELETE /api/platform/organizations/[id]", () => {
     expect(tx.notification.deleteMany.mock.calls[0][0].where).toEqual({ OR: [{ organizationId: "org1" }, { user: { organizationId: "org1" } }] });
     expect(tx.assignment.deleteMany.mock.calls[0][0].where).toEqual({ delivery: { organizationId: "org1" } });
     expect(tx.user.deleteMany.mock.calls[0][0].where).toEqual({ organizationId: "org1" });
+    for (const m of ["invoice", "webhookDelivery", "webhookEndpoint", "apiKey", "deliveryZone", "driverLocation"] as const) {
+      expect(tx[m].deleteMany, m).toHaveBeenCalledWith({ where: { organizationId: "org1" } });
+    }
     expect(tx.organization.delete).toHaveBeenCalledWith({ where: { id: "org1" } });
 
     // FK-safe order, then audit, then commit, then file cleanup.

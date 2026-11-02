@@ -20,12 +20,16 @@ import {
   Settings,
   KeyRound,
   Building2,
+  Banknote,
+  Map as MapIcon,
 } from "lucide-react";
 import { useTheme } from "next-themes";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 import { api, useApiData } from "@/lib/api-client";
-import { useAppStore, type AppView } from "@/store/app-store";
+import { goToDelivery, useAppStore, type AppView, allowedViews } from "@/store/app-store";
+import { VIEW_TITLES, appLocation, appPath } from "@/lib/app-routes";
+import { isPlainLeftClick } from "@/store/app-history";
 import { initials, timeAgo } from "@/lib/format";
 import type { NotificationItem } from "@/lib/types";
 import { Button } from "@/components/ui/button";
@@ -52,6 +56,9 @@ import {
 } from "@/components/shared/sidebar/premium-sidebar";
 import { useSidebarCollapsed } from "@/components/shared/sidebar/use-sidebar-collapsed";
 import { DeveloperCredit } from "@/components/shared/developer-credit";
+import { ROLE_LABELS } from "@/lib/roles";
+import { SubscriptionBanner } from "@/components/fleetflow/subscription-banner";
+import { OfflineBanner } from "@/components/fleetflow/offline-banner";
 
 const ADMIN_NAV: { section: string; items: { view: AppView; label: string; icon: typeof LayoutDashboard }[] }[] = [
   {
@@ -60,6 +67,7 @@ const ADMIN_NAV: { section: string; items: { view: AppView; label: string; icon:
       { view: "dashboard", label: "Dashboard", icon: LayoutDashboard },
       { view: "deliveries", label: "Deliveries", icon: Package },
       { view: "dispatch", label: "Dispatch Board", icon: Split },
+      { view: "map", label: "Live Map", icon: MapIcon },
     ],
   },
   {
@@ -73,6 +81,7 @@ const ADMIN_NAV: { section: string; items: { view: AppView; label: string; icon:
     section: "Insights",
     items: [
       { view: "reports", label: "Reports", icon: BarChart3 },
+      { view: "cod", label: "Cash (COD)", icon: Banknote },
       { view: "notifications", label: "Notifications", icon: Bell },
       { view: "audit", label: "Audit Log", icon: ScrollText },
     ],
@@ -97,19 +106,8 @@ const DRIVER_NAV: { section: string; items: { view: AppView; label: string; icon
   },
 ];
 
-const VIEW_TITLES: Record<AppView, string> = {
-  dashboard: "Operations Dashboard",
-  deliveries: "Deliveries",
-  dispatch: "Dispatch Board",
-  drivers: "Drivers",
-  vehicles: "Vehicles",
-  reports: "Reports & Analytics",
-  notifications: "Notifications",
-  audit: "Audit Log",
-  settings: "Settings",
-  "driver-jobs": "My Jobs",
-  "driver-history": "My History",
-};
+/** Matches the root layout's metadata title. */
+const APP_TITLE = "FleetFlow — Fleet & Delivery Management";
 
 /** Ends the server session, then clears session + navigation state client-side. */
 function useLogout(onDone?: () => void) {
@@ -122,6 +120,9 @@ function useLogout(onDone?: () => void) {
       /* ignore — sign out locally regardless */
     }
     useAppStore.getState().signOut();
+    // A deliberate sign-out starts the next session at its home screen ("/"); an
+    // expired session (api-client) keeps the address so signing in returns there.
+    window.history.replaceState(null, "", "/");
     onDone?.();
   }, [onDone]);
   return { logout, loggingOut };
@@ -129,24 +130,26 @@ function useLogout(onDone?: () => void) {
 
 type NotificationFeed = ReturnType<typeof useNotificationFeed>;
 
-/** One notifications feed per shell — shared by the header bell and the sidebar badge. */
+const NOTIFICATIONS_URL = "/api/notifications";
+
+/**
+ * One notifications feed per shell — shared by the header bell and the sidebar badge
+ * (and, through the request cache, the Notifications screen). Polls every 45s while
+ * the tab is visible; paused while hidden or offline, refreshed when the tab returns.
+ */
 function useNotificationFeed(enabled: boolean) {
   const bump = useAppStore((s) => s.bump);
-  const feed = useApiData<{ items: NotificationItem[]; unread: number }>(enabled ? "/api/notifications" : null);
-  const { data, reload } = feed;
+  const feed = useApiData<{ items: NotificationItem[]; unread: number }>(enabled ? NOTIFICATIONS_URL : null, {
+    refreshInterval: 45_000,
+    revalidateOnFocus: true,
+  });
+  const { data } = feed;
 
-  // poll for new notifications every 45s
-  useEffect(() => {
-    if (!enabled) return;
-    const t = setInterval(reload, 45000);
-    return () => clearInterval(t);
-  }, [enabled, reload]);
-
-  // New notifications (e.g. a fresh assignment) → refresh every mounted view.
+  // New notifications (e.g. a fresh assignment) → refresh every mounted view (the feed itself just answered).
   const prevUnread = useRef<number | null>(null);
   useEffect(() => {
     if (!data) return;
-    if (prevUnread.current !== null && data.unread > prevUnread.current) bump();
+    if (prevUnread.current !== null && data.unread > prevUnread.current) bump((key) => key !== NOTIFICATIONS_URL);
     prevUnread.current = data.unread;
   }, [data, bump]);
 
@@ -166,7 +169,7 @@ function NotificationBell({ feed, triggerClassName }: { feed: NotificationFeed; 
   const markAllRead = async () => {
     try {
       await api.post("/api/notifications/read", { all: true });
-      bump();
+      bump(NOTIFICATIONS_URL);
     } catch {
       toast.error("Could not mark notifications as read");
     }
@@ -177,14 +180,14 @@ function NotificationBell({ feed, triggerClassName }: { feed: NotificationFeed; 
     if (!n.readAt) {
       api
         .post("/api/notifications/read", { ids: [n.id] })
-        .then(() => bump())
+        .then(() => bump(NOTIFICATIONS_URL))
         .catch(() => {
           /* non-critical — it stays unread */
         });
     }
     if (n.deliveryId) {
-      useAppStore.getState().focusDelivery(n.deliveryId);
-      setView(session?.role === "DRIVER" ? "driver-jobs" : "deliveries");
+      if (session?.role === "DRIVER") useAppStore.setState({ view: "driver-jobs", focusDeliveryId: n.deliveryId });
+      else goToDelivery(n.deliveryId);
     } else {
       setView("notifications");
     }
@@ -314,7 +317,11 @@ function CompanySidebar({
   const session = useAppStore((s) => s.session);
   if (!session) return null;
   const isAdmin = session.role === "ADMIN";
-  const nav = isAdmin ? ADMIN_NAV : DRIVER_NAV;
+  // Each role sees only the views it may open (allowedViews mirrors the server's rules).
+  const allowed = allowedViews(session.role);
+  const nav = (session.role === "DRIVER" ? DRIVER_NAV : ADMIN_NAV)
+    .map((g) => ({ ...g, items: g.items.filter((i) => allowed.includes(i.view)) }))
+    .filter((g) => g.items.length > 0);
   const go = (v: AppView) => {
     setView(v);
     onNavigate?.();
@@ -329,6 +336,7 @@ function CompanySidebar({
       active: view === item.view,
       badge: item.view === "notifications" ? unread : undefined,
       badgeLabel: "unread",
+      href: appPath(appLocation(item.view)),
       onSelect: () => go(item.view),
     })),
   }));
@@ -351,7 +359,7 @@ function CompanySidebar({
       }
       user={{
         name: session.name,
-        detail: isAdmin ? "Dispatcher · Admin" : "Driver",
+        detail: session.isOwner ? "Owner · Admin" : ROLE_LABELS[session.role],
         initials: initials(session.name),
         menuLabel: (
           <>
@@ -398,10 +406,14 @@ function DriverBottomNav() {
           const active = view === item.view;
           const Icon = item.icon;
           return (
-            <button
+            <a
               key={item.view}
-              type="button"
-              onClick={() => setView(item.view)}
+              href={appPath(appLocation(item.view))}
+              onClick={(e) => {
+                if (!isPlainLeftClick(e)) return;
+                e.preventDefault();
+                setView(item.view);
+              }}
               className={cn(
                 "group flex min-h-14 flex-col items-center justify-center gap-1 rounded-2xl text-xs font-medium outline-none transition-colors duration-150 focus-visible:ring-[3px] focus-visible:ring-ring/50",
                 active ? "text-primary" : "text-muted-foreground hover:text-foreground"
@@ -418,7 +430,7 @@ function DriverBottomNav() {
                 <Icon className="size-5" strokeWidth={active ? 2.25 : 2} />
               </span>
               <span className={cn(active && "font-semibold")}>{item.label}</span>
-            </button>
+            </a>
           );
         })}
       </div>
@@ -443,6 +455,14 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   };
   const notifications = useNotificationFeed(!forcePasswordChange);
   const unread = notifications.data?.unread ?? 0;
+
+  // Browser tab title per screen (back to the app title when the shell goes away, e.g. on sign-out).
+  useEffect(() => {
+    document.title = `${VIEW_TITLES[view]} · FleetFlow`;
+    return () => {
+      document.title = APP_TITLE;
+    };
+  }, [view]);
   const [collapsed, setCollapsed] = useSidebarCollapsed("fleetflow:sidebar-collapsed:app");
 
   return (
@@ -524,7 +544,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                   <div className="text-xs font-normal text-muted-foreground">{session?.email}</div>
                   <div className="mt-1">
                     <Badge variant="outline" className="bg-primary/10 text-primary border-primary/20">
-                      {session?.role === "ADMIN" ? "Admin / Dispatcher" : "Driver"}
+                      {session ? (session.isOwner ? "Owner" : ROLE_LABELS[session.role]) : ""}
                     </Badge>
                   </div>
                 </DropdownMenuLabel>
@@ -554,7 +574,11 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               Set your own password to continue using FleetFlow.
             </div>
           ) : (
-            children
+            <>
+              <OfflineBanner />
+              {session && !isDriver && <SubscriptionBanner access={session.subscription} canManagePlan={session.role === "ADMIN"} />}
+              {children}
+            </>
           )}
         </main>
 

@@ -11,7 +11,10 @@ import { db } from "@/lib/db";
 const WINDOW_MS = 15 * 60 * 1000;
 // Per-account limit stops password guessing; the per-client limit is looser
 // so a shared office IP isn't locked out by a few typos.
-const MAX_FAILURES: Record<string, number> = { email: 5, ip: 30 };
+// Forgot-password requests count every attempt: a few per mailbox, more per
+// client (an office of drivers shares one IP). Other prefixes ("mfa:",
+// "signup:", "reset-ip:"…) get the default of 5.
+const MAX_FAILURES: Record<string, number> = { email: 5, ip: 30, "forgot-email": 3, "forgot-ip": 20 };
 
 function maxFor(key: string): number {
   return MAX_FAILURES[key.split(":")[0]] ?? 5;

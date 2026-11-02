@@ -1,5 +1,5 @@
 import { db } from "@/lib/db";
-import { fail, ok, requireAdmin } from "@/lib/api-helpers";
+import { fail, ok, requireStaff } from "@/lib/api-helpers";
 import { toDeliveryDTO, toAssignmentDTO } from "@/lib/serializers";
 import { PRIORITIES } from "@/lib/constants";
 import type { Prisma } from "@prisma/client";
@@ -31,7 +31,7 @@ function compareQueue(a: QueueItem, b: QueueItem): number {
 // assignments, and driver/vehicle availability for the assign dialog.
 export async function GET() {
   try {
-    const user = await requireAdmin();
+    const user = await requireStaff();
     const orgId = user.organizationId;
 
     const deliveryInclude = {
@@ -52,15 +52,28 @@ export async function GET() {
       { priority: { notIn: [...PRIORITIES] } },
     ];
 
+    // Count each bucket first so at most QUEUE_LIMIT rows are loaded in total
+    // (higher priorities take their share of the cap first).
+    const bucketCounts = await Promise.all(priorityFilters.map((pf) => db.delivery.count({ where: { ...queueWhere, ...pf } })));
+    let room = QUEUE_LIMIT;
+    const bucketTakes = bucketCounts.map((n) => {
+      const take = Math.min(n, room);
+      room -= take;
+      return take;
+    });
+    const queueTotal = bucketCounts.reduce((a, b) => a + b, 0);
+
     const [queueBuckets, activeAssignments, drivers, vehicles] = await Promise.all([
       Promise.all(
-        priorityFilters.map((pf) =>
-          db.delivery.findMany({
-            where: { ...queueWhere, ...pf },
-            orderBy: queueOrder,
-            take: QUEUE_LIMIT,
-            include: deliveryInclude,
-          })
+        priorityFilters.map((pf, i) =>
+          bucketTakes[i] === 0
+            ? Promise.resolve([])
+            : db.delivery.findMany({
+                where: { ...queueWhere, ...pf },
+                orderBy: queueOrder,
+                take: bucketTakes[i],
+                include: deliveryInclude,
+              })
         )
       ),
       db.assignment.findMany({
@@ -96,6 +109,8 @@ export async function GET() {
 
     return ok({
       unassigned: unassigned.map((d) => toDeliveryDTO(d, false)),
+      /** Deliveries waiting in the queue; more than unassigned.length when the cap applied. */
+      queueTotal,
       assignments: activeAssignments.map((a) => ({
         ...toAssignmentDTO(a),
         delivery: toDeliveryDTO(a.delivery, false),

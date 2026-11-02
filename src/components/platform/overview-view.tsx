@@ -8,6 +8,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { useConsole } from "./console-context";
 import { usePlatformData } from "./platform-api";
 import { EmptyState, ErrorState, fmtNum, KpiCard } from "./shared";
+import { PaymentsToVerify } from "./invoices/payments-to-verify";
 
 export const DELIVERY_STATUS_COLORS: Record<string, string> = {
   CREATED: "#71717a",
@@ -56,6 +57,8 @@ export function OverviewView() {
   return (
     <div className="flex flex-col gap-5">
       {error && <ErrorState title="Showing the last loaded figures" message={error} onRetry={reload} />}
+
+      <PaymentsToVerify />
 
       <section aria-label="Key figures" className="grid grid-cols-2 gap-3 lg:grid-cols-4">
         <KpiCard icon={Building2} label="Organizations" value={fmtNum(orgs.total)} hint={`${fmtNum(orgs.active)} active`} tone="emerald" />

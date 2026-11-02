@@ -19,8 +19,9 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { useTheme } from "next-themes";
-import { cn } from "@/lib/utils";
+import { toast } from "sonner";
 import { initials } from "@/lib/format";
+import { clearDataCache } from "@/lib/data-cache";
 import type { PlatformAdminInfo } from "@/lib/platform-types";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
@@ -198,7 +199,17 @@ export function PlatformConsole({ initialAdmin }: { initialAdmin: PlatformAdminI
   const [admin, setAdmin] = useState<PlatformAdminInfo>(initialAdmin);
   const router = useRouter();
 
-  useEffect(() => onPlatformUnauthorized(() => router.replace("/?next=platform")), [router]);
+  useEffect(
+    () =>
+      onPlatformUnauthorized(() => {
+        // One toast however many requests hit the 401 (id dedupes). Idle limit: src/lib/session-policy.ts.
+        toast.error("Your platform session has ended (e.g. after 30 minutes of inactivity). Please sign in again.", { id: "platform-session-ended" });
+        router.replace("/?next=platform");
+      }),
+    [router]
+  );
+  // Leaving the console (sign-out, expired session): no cached platform data survives in this tab.
+  useEffect(() => () => clearDataCache(), []);
 
   return (
     <ConsoleShell

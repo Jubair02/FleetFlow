@@ -1,7 +1,8 @@
 import { createHash } from "crypto";
 import { cookies } from "next/headers";
-import { SESSION_COOKIE } from "@/lib/auth";
-import type { Prisma, DriverProfile, Organization, User } from "@prisma/client";
+import { SESSION_COOKIE, type SessionOrg } from "@/lib/auth";
+import { subscriptionAccess } from "@/lib/subscription";
+import type { Prisma, DriverProfile, User } from "@prisma/client";
 
 export { generateTempPassword } from "@/lib/temp-password";
 
@@ -11,7 +12,7 @@ export { generateTempPassword } from "@/lib/temp-password";
 
 type UserWithOrg = User & {
   driverProfile: DriverProfile | null;
-  organization: Pick<Organization, "id" | "name">;
+  organization: SessionOrg;
 };
 
 /** The session payload returned by login, signup and /me (see SessionUser in types.ts). */
@@ -23,8 +24,11 @@ export function sessionUserDto(user: UserWithOrg) {
     role: user.role,
     organizationId: user.organizationId,
     organizationName: user.organization.name,
+    timezone: user.organization.timezone,
     driverProfile: user.driverProfile,
     mustChangePassword: user.mustChangePassword,
+    isOwner: user.isOwner,
+    subscription: subscriptionAccess(user.organization),
   };
 }
 

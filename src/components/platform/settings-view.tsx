@@ -11,6 +11,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { useConsole } from "./console-context";
 import { usePlatformData } from "./platform-api";
 import { ErrorState, PageHeader, UserStatusBadge } from "./shared";
+import { TwoFactorCard } from "./two-factor-card";
 
 function Row({ label, children }: { label: string; children: React.ReactNode }) {
   return (
@@ -65,6 +66,8 @@ export function SettingsView() {
         </CardContent>
       </Card>
 
+      <TwoFactorCard status={data?.twoFactor ?? null} email={admin.email} onChanged={reload} />
+
       {error && !data ? (
         <ErrorState title="Couldn't load platform settings" message={error} onRetry={reload} />
       ) : !data ? (
@@ -106,6 +109,7 @@ export function SettingsView() {
                       <TableCell>
                         <UserStatusBadge active={a.active} />
                         {a.mustChangePassword && <div className="mt-0.5 text-[11px] text-amber-600 dark:text-amber-400">temporary password</div>}
+                        {!a.twoFactorEnabled && <div className="mt-0.5 text-[11px] text-amber-600 dark:text-amber-400">2FA set-up at next sign-in</div>}
                       </TableCell>
                       <TableCell className="whitespace-nowrap pr-4 text-muted-foreground">{a.lastLoginAt ? timeAgo(a.lastLoginAt) : "Never"}</TableCell>
                     </TableRow>

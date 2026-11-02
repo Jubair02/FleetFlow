@@ -14,7 +14,7 @@ export function codesSummary(codes: string[], total: number, show = 2): string {
   return rest > 0 ? `${shown.join(", ")} +${rest} more` : shown.join(", ");
 }
 
-export type AttentionKind = "overdue" | "failed" | "urgent" | "vehicles";
+export type AttentionKind = "overdue" | "failed" | "urgent" | "reschedule" | "vehicles";
 
 export interface AttentionItem {
   kind: AttentionKind;
@@ -67,6 +67,12 @@ export function attentionItems(d: DashboardData, due: (iso: string | null) => st
         .filter(Boolean)
         .join(" · "),
       singleDeliveryId: null,
+    },
+    {
+      kind: "reschedule",
+      count: a.rescheduleCount ?? 0,
+      context: codesSummary((a.rescheduleRequests ?? []).map((r) => r.trackingCode), a.rescheduleCount ?? 0),
+      singleDeliveryId: a.rescheduleCount === 1 ? (a.rescheduleRequests?.[0]?.id ?? null) : null,
     },
     {
       kind: "vehicles",

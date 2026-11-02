@@ -48,6 +48,17 @@ export function byUrgency(a: MyJob, b: MyJob): number {
   return ea - eb;
 }
 
+/**
+ * Jobs in the planned route order (Stop 1, 2, …) when dispatch has planned
+ * one; unplanned jobs follow, most urgent first.
+ */
+export function byRoute(a: MyJob, b: MyJob): number {
+  const ra = a.routeSeq ?? Number.POSITIVE_INFINITY;
+  const rb = b.routeSeq ?? Number.POSITIVE_INFINITY;
+  if (ra !== rb) return ra < rb ? -1 : 1;
+  return byUrgency(a, b);
+}
+
 /** Before pickup the driver heads to the pickup point; afterwards to the recipient. */
 export function navigationTarget(job: Delivery): { address: string; toPickup: boolean } {
   const toPickup = job.status === "ASSIGNED";

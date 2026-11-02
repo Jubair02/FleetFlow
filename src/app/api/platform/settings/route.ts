@@ -3,6 +3,7 @@ import { fail, ok } from "@/lib/api-helpers";
 import { getEmailStatus } from "@/lib/email";
 import { requirePlatformAdmin } from "@/lib/platform-auth";
 import { toAdminInfo } from "@/lib/platform-service";
+import { mfaStatus } from "@/lib/platform-mfa";
 import type { PlatformSettingsData } from "@/lib/platform-types";
 
 // GET /api/platform/settings → PlatformSettingsData (read-only; no secrets or hashes)
@@ -10,13 +11,14 @@ export async function GET() {
   try {
     const admin = await requirePlatformAdmin();
     const admins = await db.platformAdmin.findMany({
-      select: { id: true, name: true, email: true, mustChangePassword: true, lastLoginAt: true, createdAt: true, active: true },
+      select: { id: true, name: true, email: true, mustChangePassword: true, lastLoginAt: true, createdAt: true, active: true, totpEnabledAt: true },
       orderBy: [{ createdAt: "asc" }, { id: "asc" }],
     });
     const email = getEmailStatus();
     const body: PlatformSettingsData = {
       admin: toAdminInfo(admin),
-      platformAdmins: admins.map((a) => ({ ...toAdminInfo(a), active: a.active })),
+      twoFactor: mfaStatus(admin),
+      platformAdmins: admins.map((a) => ({ ...toAdminInfo(a), active: a.active, twoFactorEnabled: !!a.totpEnabledAt })),
       environment: {
         emailProvider: email.provider,
         emailConfigured: email.configured,

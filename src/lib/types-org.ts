@@ -1,3 +1,4 @@
+import type { StaffRole } from "@/lib/roles";
 // ─────────────────────────────────────────────────────────────
 // Frontend API contract types for company settings, staff and
 // onboarding (mirror of /api/org, /api/staff, /api/onboarding).
@@ -14,6 +15,9 @@ export interface OrgSettings {
   contactEmail: string | null;
   address: string | null;
   defaultPickupAddress: string | null;
+  /** Depot / default pickup point on the map (route planning starts here). */
+  pickupLat?: number | null;
+  pickupLng?: number | null;
   timezone: string;
   createdAt: string;
 }
@@ -55,6 +59,9 @@ export interface StaffItem {
   id: string;
   name: string;
   email: string;
+  role: StaffRole;
+  /** The account that created the company — other admins can't change it. */
+  isOwner: boolean;
   active: boolean;
   mustChangePassword: boolean;
   lastLoginAt: string | null;
@@ -65,7 +72,7 @@ export interface StaffItem {
 
 export interface StaffList {
   items: StaffItem[];
-  /** Plan limit for active admins; null = unlimited. */
+  /** Plan limit for active admins + dispatchers; null = unlimited. */
   limit: number | null;
   activeCount: number;
 }
@@ -73,4 +80,46 @@ export interface StaffList {
 /** Returned once by every endpoint that sets a temporary password. */
 export interface TempPasswordResult {
   temporaryPassword: string;
+}
+
+// GET /api/cod — cash on delivery overview (whole BDT)
+export interface CodSummary {
+  totals: {
+    /** Collected by drivers, not yet handed over. */
+    cashWithDrivers: number;
+    collectedToday: number;
+    collectedTodayCount: number;
+    settledToday: number;
+    /** COD still due on deliveries that aren't finished. */
+    toCollect: number;
+    toCollectCount: number;
+  };
+  drivers: {
+    driverId: string;
+    name: string;
+    phone: string | null;
+    active: boolean;
+    cashInHand: number;
+    deliveries: number;
+    oldestCollectedAt: string | null;
+  }[];
+  /** Collected less than was due (last 30 days). */
+  short: {
+    deliveryId: string;
+    trackingCode: string;
+    recipientName: string;
+    codAmount: number;
+    collected: number;
+    driverName: string | null;
+    collectedAt: string;
+  }[];
+  settlements: {
+    id: string;
+    driverName: string;
+    amount: number;
+    deliveryCount: number;
+    receivedByName: string;
+    note: string | null;
+    createdAt: string;
+  }[];
 }

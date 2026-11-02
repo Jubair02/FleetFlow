@@ -32,7 +32,7 @@ const STATUS_STYLES: Record<string, string> = {
   IN_TRANSIT: "bg-cyan-100 text-cyan-800 border-cyan-200 dark:bg-cyan-950/60 dark:text-cyan-300 dark:border-cyan-800",
   DELIVERED: "bg-emerald-100 text-emerald-800 border-emerald-200 dark:bg-emerald-950/60 dark:text-emerald-300 dark:border-emerald-800",
   FAILED: "bg-rose-100 text-rose-800 border-rose-200 dark:bg-rose-950/60 dark:text-rose-300 dark:border-rose-800",
-  CANCELLED: "bg-zinc-100 text-zinc-500 border-zinc-200 dark:bg-zinc-800/40 dark:text-zinc-400 dark:border-zinc-700 line-through",
+  CANCELLED: "bg-zinc-100 text-zinc-600 border-zinc-200 dark:bg-zinc-800/40 dark:text-zinc-400 dark:border-zinc-700 line-through",
 };
 
 export function StatusBadge({ status, className }: { status: string; className?: string }) {
@@ -57,9 +57,10 @@ export const STATUS_ICONS: Record<string, LucideIcon> = {
 
 const PRIORITY_STYLES: Record<string, string> = {
   URGENT: "bg-rose-600 text-white border-rose-600",
-  HIGH: "bg-amber-500 text-white border-amber-500",
+  // amber-950 on amber-400 ≈ 9:1 (white on amber-500 was ≈ 2:1, failing WCAG AA).
+  HIGH: "bg-amber-400 text-amber-950 border-amber-400",
   NORMAL: "bg-zinc-100 text-zinc-600 border-zinc-200 dark:bg-zinc-800 dark:text-zinc-300 dark:border-zinc-700",
-  LOW: "bg-transparent text-zinc-400 border-zinc-200 dark:border-zinc-700",
+  LOW: "bg-transparent text-zinc-600 border-zinc-300 dark:text-zinc-400 dark:border-zinc-700",
 };
 
 export function PriorityBadge({ priority, className }: { priority: string; className?: string }) {
@@ -89,7 +90,7 @@ export function VehicleStatusBadge({ status }: { status: string }) {
     );
   }
   return (
-    <Badge variant="outline" className="bg-zinc-100 text-zinc-500 border-zinc-200 dark:bg-zinc-800/40 dark:text-zinc-400 dark:border-zinc-700">
+    <Badge variant="outline" className="bg-zinc-100 text-zinc-600 border-zinc-200 dark:bg-zinc-800/40 dark:text-zinc-400 dark:border-zinc-700">
       <CircleOff className="size-3 mr-1" /> Inactive
     </Badge>
   );
@@ -117,7 +118,7 @@ export function AvailabilityBadge({ availability }: { availability: string }) {
     );
   }
   return (
-    <Badge variant="outline" className="bg-zinc-100 text-zinc-500 border-zinc-200 dark:bg-zinc-800/40 dark:text-zinc-400 dark:border-zinc-700">
+    <Badge variant="outline" className="bg-zinc-100 text-zinc-600 border-zinc-200 dark:bg-zinc-800/40 dark:text-zinc-400 dark:border-zinc-700">
       <span className="size-1.5 rounded-full bg-zinc-400 mr-1" /> Off duty
     </Badge>
   );

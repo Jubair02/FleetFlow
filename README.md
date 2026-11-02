@@ -35,6 +35,7 @@ See [.env.example](.env.example) for every variable. Without the Cloudinary vari
 | `npm run db:migrate:dev` | Create a new migration from schema changes (development DB only) |
 | `npm run db:status` | Show which migrations a database has |
 | `node scripts/create-super-admin.mjs` | The only way to create a platform admin |
+| `node scripts/reset-super-admin-2fa.mjs <email>` | Clear a platform admin's two-factor setup (lost phone + backup codes); they re-enrol at next sign-in |
 | `node scripts/set-plan.mjs` | Change a company's plan from the command line (`--dry-run` supported) |
 | `node scripts/migrate-pod-to-cloudinary.mjs` | Move proof files from `storage/pod` to Cloudinary (`--dry-run` supported) |
 
@@ -68,7 +69,8 @@ Never use `prisma db push` or `prisma migrate reset` against the shared database
 1. Import the GitHub repo in Vercel (framework: Next.js; defaults are fine).
 2. Set environment variables for **Production** (and Preview if you use it):
    `DATABASE_URL`, `DIRECT_URL`, `APP_URL`, `CLOUDINARY_CLOUD_NAME`, `CLOUDINARY_API_KEY`, `CLOUDINARY_API_SECRET`,
-   `EMAIL_PROVIDER`, `RESEND_API_KEY`, `EMAIL_FROM`, `NEXT_PUBLIC_SENTRY_DSN`, `SENTRY_AUTH_TOKEN`, `ALLOW_SIGNUP`.
+   `EMAIL_PROVIDER`, `RESEND_API_KEY`, `EMAIL_FROM`, `NEXT_PUBLIC_SENTRY_DSN`, `SENTRY_AUTH_TOKEN`, `ALLOW_SIGNUP`,
+   and the billing settings `PAYMENT_BKASH_NUMBER` / `PAYMENT_NAGAD_NUMBER` / `PAYMENT_BANK_DETAILS` / `BILLING_NOTIFY_EMAIL`.
    Keep `NEXT_PUBLIC_DEMO_MODE` unset.
 3. Apply migrations **before** deploying code that needs them: `npm run db:migrate` from your machine (or a CI job) with the production `DIRECT_URL`. Deploys don't run migrations, so a preview build can never change the production schema.
 4. After deploying, check `GET /api/` returns `200` with `"database":"ok"` and `"storage":"cloudinary"`, and point an uptime monitor at it.
@@ -82,5 +84,6 @@ Notes:
 
 - **Health:** `GET /api/` → `{ status, database, dbLatencyMs, storage }`; `503` when the database is unreachable.
 - **Errors:** Sentry (org `jubu`), server and browser. Request bodies, cookies, query strings, database parameters and local variables are never sent (`src/lib/sentry-options.ts`).
-- **Billing:** manual — see [docs/BILLING.md](docs/BILLING.md).
+- **Billing:** invoices with manual payment (bKash / Nagad / bank transfer, verified in /platform). Renewal invoices are issued by the daily cron; set `PAYMENT_BKASH_NUMBER`, `PAYMENT_NAGAD_NUMBER`, `PAYMENT_ROCKET_NUMBER`, `PAYMENT_BANK_DETAILS` (shown on invoices) and optionally `BILLING_NOTIFY_EMAIL` (payment-reported alerts); `PAYMENT_PROVIDER` defaults to `manual`. See [docs/BILLING.md](docs/BILLING.md) §0.
 - **Email:** outbox with manual retry — see [docs/NOTIFICATIONS.md](docs/NOTIFICATIONS.md).
+- **Account security:** see [docs/SECURITY.md](docs/SECURITY.md). "Forgot password?" emails need `APP_URL` (the link's host) and a working email provider (`EMAIL_PROVIDER=resend` + `RESEND_API_KEY` + `EMAIL_FROM`); with the console provider nobody receives the link. Super admins sign in with password + authenticator app (mandatory); a staff member who lost both phone and backup codes is reset with `node scripts/reset-super-admin-2fa.mjs <email>` after verifying who they are. Idle sessions end after 30 min (console) / 24 h (company admins & dispatchers); drivers have no idle limit.

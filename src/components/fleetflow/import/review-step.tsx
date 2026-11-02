@@ -90,6 +90,8 @@ const EDIT_COLUMNS: ImportColumn[] = [
   "expected_delivery",
   "order_ref",
   "instructions",
+  "weight_kg",
+  "delivery_fee",
 ];
 
 const COLUMN_WIDTH: Record<ImportColumn, string> = {
@@ -102,6 +104,8 @@ const COLUMN_WIDTH: Record<ImportColumn, string> = {
   instructions: "w-56",
   priority: "w-28",
   expected_delivery: "w-40",
+  weight_kg: "w-24",
+  delivery_fee: "w-28",
 };
 
 const INPUT_CLASS =

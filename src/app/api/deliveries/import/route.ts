@@ -4,11 +4,16 @@ import { z } from "zod";
 import { Prisma } from "@prisma/client";
 
 import { db } from "@/lib/db";
-import { ApiError, fail, ok, readJson, requireAdmin } from "@/lib/api-helpers";
+import { ApiError, fail, ok, readJson, requireStaff } from "@/lib/api-helpers";
 import type { SessionUser } from "@/lib/auth";
 import { assertFeature, assertPlanLimit, getOrgPlan, getUsage } from "@/lib/plans";
 import { generateTrackingCode, generateTrackingToken } from "@/lib/delivery";
 import { auditData, bestEffort, sendCustomerTrackingEmail } from "@/lib/notify";
+import { toPublicDelivery } from "@/lib/public-delivery";
+import { loadZones, planChargeWith } from "@/lib/zone-service";
+import { NEW_DELIVERY_STATE } from "@/lib/zones";
+import { dispatchWebhooksSoon, queueWebhookEvents } from "@/lib/webhooks";
+import { geocodeDeliveriesSoon } from "@/lib/geocoding";
 import { normalizeCsvText } from "@/lib/csv";
 import {
   applyLikelyDuplicateOverrides,
@@ -71,6 +76,8 @@ import { DEFAULT_TIMEZONE, isValidTimezone } from "@/lib/timezone";
 //     5. createMany one CREATED DeliveryEvent per delivery, same chunking
 //     6. one AuditLog row DELIVERIES_IMPORTED with source, counts and the
 //        imported/skipped/failed row numbers (compact "2-40,42" form)
+//     (4b. one delivery.created webhook row per delivery and subscribed
+//        endpoint — src/lib/webhooks.ts; sent after commit)
 //   A tracking code/token race with a concurrent create (P2002) aborts the
 //   Postgres transaction, so the WHOLE transaction is retried (max 3) with
 //   fresh codes. No partial imports are possible.
@@ -257,7 +264,7 @@ function planOrBadRequest(build: () => ImportPlan): ImportPlan {
 
 // ── Commit (shared by both body shapes) ──────────────────────
 
-type CreatedDelivery = { id: string; trackingCode: string; trackingToken: string; recipientName: string; recipientEmail: string | null };
+type CreatedDelivery = { id: string; trackingCode: string; trackingToken: string; recipientName: string; recipientEmail: string | null; recipientPhone?: string };
 
 interface CommitInput {
   user: SessionUser;
@@ -321,6 +328,15 @@ function commitOnce(input: CommitInput): Promise<CommitResult> {
     });
 
     const codes = await uniqueTrackingCodes(tx, toCreate.length);
+    // zone + delivery charge per row (src/lib/zones.ts); a delivery_fee cell is an override
+    const zones = await loadZones(tx, organizationId);
+    const zoneNames = new Map(zones.map((z) => [z.id, z.name]));
+    const chargeOf = (r: ImportRow) =>
+      planChargeWith(zones, NEW_DELIVERY_STATE, {
+        deliveryAddress: r.data.deliveryAddress,
+        weightKg: r.data.weightKg ?? null,
+        deliveryFeeBdt: r.data.deliveryFeeBdt ?? undefined,
+      });
     const created: CreatedDelivery[] = [];
     for (const part of chunks(toCreate.map((r, i) => ({ r, code: codes[i] })), CHUNK_SIZE)) {
       const inserted = await tx.delivery.createManyAndReturn({
@@ -338,11 +354,18 @@ function commitOnce(input: CommitInput): Promise<CommitResult> {
           priority: r.data.priority,
           status: "CREATED",
           expectedAt: r.data.expectedAt ? new Date(r.data.expectedAt) : null,
+          weightKg: r.data.weightKg ?? null,
+          ...chargeOf(r),
           importBatchId: batch.id,
         })),
-        select: { id: true, trackingCode: true, trackingToken: true, recipientName: true, recipientEmail: true },
       });
       created.push(...inserted);
+      // one delivery.created webhook per imported delivery (rows only for subscribed endpoints)
+      await queueWebhookEvents(
+        tx,
+        organizationId,
+        inserted.map((d) => ({ event: "delivery.created" as const, data: async () => ({ delivery: toPublicDelivery({ ...d, zone: d.zoneId ? { name: zoneNames.get(d.zoneId) ?? "" } : null }) }) }))
+      );
     }
 
     const eventNote = `Imported from ${fileName}`.slice(0, 500);
@@ -464,12 +487,16 @@ async function replayCommit(organizationId: string, idempotencyKey: string, file
   };
 }
 
-/** Customer tracking emails, best-effort, after the response is sent. */
+/**
+ * Customer tracking email + SMS (each gated by the plan), best-effort, after the
+ * response is sent. Every delivery has a phone, so all of them are queued;
+ * returns how many have an email address.
+ */
 function queueTrackingEmails(organizationId: string, created: CreatedDelivery[]): number {
   const toEmail = created.filter((d) => d.recipientEmail);
-  if (toEmail.length) {
+  if (created.length) {
     after(async () => {
-      const queue = [...toEmail];
+      const queue = [...created];
       const worker = async () => {
         for (let d = queue.shift(); d; d = queue.shift()) {
           const delivery = d;
@@ -481,6 +508,7 @@ function queueTrackingEmails(organizationId: string, created: CreatedDelivery[])
               trackingToken: delivery.trackingToken,
               recipientName: delivery.recipientName,
               recipientEmail: delivery.recipientEmail,
+              recipientPhone: delivery.recipientPhone,
             })
           );
         }
@@ -570,6 +598,8 @@ async function handleMapped(user: SessionUser, body: MappedBody): Promise<Respon
   const { result } = outcome;
   if (!result.batchId) return ok(respond(result, 0));
   const emailsQueued = queueTrackingEmails(organizationId, result.created);
+  dispatchWebhooksSoon(organizationId);
+  geocodeDeliveriesSoon(result.created.map((d) => d.id));
   return ok(respond(result, emailsQueued), 201);
 }
 
@@ -620,6 +650,8 @@ async function handleLegacyCsv(user: SessionUser, body: z.infer<typeof legacyBod
   );
   if (outcome.kind === "replay") return ok(outcome.response); // unreachable without an idempotency key
   const { result } = outcome;
+  dispatchWebhooksSoon(organizationId);
+  geocodeDeliveriesSoon(result.created.map((d) => d.id));
   const finalTotals = importTotals(result.rows);
   return ok(
     {
@@ -635,7 +667,7 @@ async function handleLegacyCsv(user: SessionUser, body: z.infer<typeof legacyBod
 
 export async function POST(req: Request) {
   try {
-    const user = await requireAdmin();
+    const user = await requireStaff();
     await assertFeature(db, user.organizationId, "csv_import");
     const declared = Number(req.headers.get("content-length") ?? 0);
     if (declared > MAX_BODY_BYTES) throw new ApiError(413, "This import is too large — split it into smaller imports");

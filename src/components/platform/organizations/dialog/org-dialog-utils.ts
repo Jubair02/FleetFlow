@@ -13,23 +13,7 @@ export const SHEET_ON_PHONE =
 export const FULL_ON_PHONE =
   "max-sm:inset-0 max-sm:h-dvh max-sm:max-h-dvh max-sm:max-w-full max-sm:translate-x-0 max-sm:translate-y-0 max-sm:rounded-none max-sm:border-0";
 
-/** Common zones for FleetFlow customers (same list as the company settings page). */
-export const TIMEZONES = [
-  { value: "Asia/Dhaka", label: "Bangladesh — Asia/Dhaka (UTC+6)" },
-  { value: "Asia/Kolkata", label: "India — Asia/Kolkata (UTC+5:30)" },
-  { value: "Asia/Kathmandu", label: "Nepal — Asia/Kathmandu (UTC+5:45)" },
-  { value: "Asia/Karachi", label: "Pakistan — Asia/Karachi (UTC+5)" },
-  { value: "Asia/Dubai", label: "UAE — Asia/Dubai (UTC+4)" },
-  { value: "Asia/Singapore", label: "Singapore — Asia/Singapore (UTC+8)" },
-  { value: "Asia/Kuala_Lumpur", label: "Malaysia — Asia/Kuala_Lumpur (UTC+8)" },
-  { value: "Europe/London", label: "UK — Europe/London" },
-  { value: "UTC", label: "UTC" },
-];
-
-/** The list above, plus the organization's current zone when it isn't in it. */
-export function timezoneOptions(current: string): { value: string; label: string }[] {
-  return TIMEZONES.some((t) => t.value === current) ? TIMEZONES : [{ value: current, label: current }, ...TIMEZONES];
-}
+export { TIMEZONES, timezoneOptions } from "@/lib/timezone";
 
 /** "Renews 30 Nov 2026" / "Ends …" (cancelled, still paid) / "Ended …"; null without a paid-until date. */
 export function renewalLabel(paidUntil: string | null, subscriptionStatus: string, now: Date, fmt: (iso: string) => string): string | null {

@@ -98,6 +98,17 @@ export function PodDialog({
 
   const [preparing, setPreparing] = useState(false);
   const busy = submitting || preparing;
+  // Cash on delivery: what the driver actually collected (pre-filled with the amount due).
+  const codDue = job.codAmount && !job.codCollectedAt ? job.codAmount : null;
+  const [codCollected, setCodCollected] = useState(codDue !== null ? String(codDue) : "");
+  // Location is evidence, never a blocker: requested when the dialog opens, sent if ready.
+  const positionRef = useRef<Promise<GeolocationPosition | null> | null>(null);
+  useEffect(() => {
+    if (typeof navigator === "undefined" || !navigator.geolocation) return;
+    positionRef.current = new Promise((resolve) => {
+      navigator.geolocation.getCurrentPosition(resolve, () => resolve(null), { enableHighAccuracy: true, timeout: 15_000, maximumAge: 60_000 });
+    });
+  }, []);
 
   const pickPhoto = async (picked: File | null) => {
     let file = picked;
@@ -145,12 +156,27 @@ export function PodDialog({
       toast.error(`Recipient name must be ${MAX_RECIPIENT_NAME} characters or fewer`);
       return;
     }
-    const upload = (file: File, kind: "SIGNATURE" | "PHOTO", complete: boolean) => {
+    if (codDue !== null && !/^\d+$/.test(codCollected.trim())) {
+      toast.error("Enter the cash you collected, in whole taka");
+      return;
+    }
+    // Wait briefly (once) for a location fix; give up rather than hold up the delivery.
+    const located = positionRef.current
+      ? Promise.race([positionRef.current, new Promise<null>((r) => setTimeout(() => r(null), 3000))])
+      : Promise.resolve(null);
+    const upload = async (file: File, kind: "SIGNATURE" | "PHOTO", complete: boolean) => {
+      const position = await located;
       const form = new FormData();
       form.append("recipientName", name);
       form.append("complete", complete ? "true" : "false");
       form.append("file", file, file.name);
       form.append("kind", kind);
+      if (complete && codDue !== null) form.append("codCollected", codCollected.trim());
+      if (position) {
+        form.append("latitude", String(position.coords.latitude));
+        form.append("longitude", String(position.coords.longitude));
+        form.append("accuracy", String(position.coords.accuracy));
+      }
       return api.post(`/api/deliveries/${job.id}/pod`, form);
     };
     setSubmitting(true);
@@ -210,6 +236,33 @@ export function PodDialog({
             />
             {nameMissing && <p className="text-sm text-rose-700 dark:text-rose-400">Recipient name is required.</p>}
           </div>
+
+          {codDue !== null && (
+            <div className="flex flex-col gap-2 rounded-xl border border-amber-200 bg-amber-50 p-3 dark:border-amber-900/60 dark:bg-amber-950/40">
+              <Label htmlFor="pod-cod" className="text-sm font-medium text-amber-900 dark:text-amber-200">
+                Cash collected * <span className="font-normal">(due ৳{codDue.toLocaleString("en-US")})</span>
+              </Label>
+              <div className="relative">
+                <span className="pointer-events-none absolute top-1/2 left-3 -translate-y-1/2 text-base text-muted-foreground" aria-hidden="true">
+                  ৳
+                </span>
+                <Input
+                  id="pod-cod"
+                  inputMode="numeric"
+                  value={codCollected}
+                  onChange={(e) => setCodCollected(e.target.value.replace(/[^\d]/g, ""))}
+                  autoComplete="off"
+                  className="h-12 rounded-xl bg-background pl-7 text-base tabular-nums"
+                  aria-describedby="pod-cod-hint"
+                />
+              </div>
+              <p id="pod-cod-hint" className="text-xs text-amber-900/80 dark:text-amber-200/80">
+                {codCollected && Number(codCollected) < codDue
+                  ? `That's ৳${(codDue - Number(codCollected)).toLocaleString("en-US")} short — the office will see it.`
+                  : "Enter exactly what the recipient paid. Hand it to the office later."}
+              </p>
+            </div>
+          )}
 
           <SignaturePad canvasRef={canvasRef} onInkChange={setHasSignature} invalid={proofMissing} />
 

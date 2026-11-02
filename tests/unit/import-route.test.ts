@@ -13,12 +13,14 @@ const db = vi.hoisted(() => ({
   deliveryEvent: { createMany: vi.fn() },
   importBatch: { findUnique: vi.fn(), create: vi.fn() },
   auditLog: { create: vi.fn(), findFirst: vi.fn() },
+  webhookEndpoint: { findMany: vi.fn() },
+  deliveryZone: { findMany: vi.fn() },
 }));
 vi.mock("@/lib/db", () => ({ db }));
 vi.mock("next/headers", () => ({ cookies: async () => ({ get: () => undefined, set: vi.fn(), delete: vi.fn() }) }));
 vi.mock("next/server", async (orig) => ({ ...(await orig<typeof import("next/server")>()), after: vi.fn() }));
 const requireAdmin = vi.hoisted(() => vi.fn());
-vi.mock("@/lib/api-helpers", async (orig) => ({ ...(await orig<typeof import("@/lib/api-helpers")>()), requireAdmin }));
+vi.mock("@/lib/api-helpers", async (orig) => ({ ...(await orig<typeof import("@/lib/api-helpers")>()), requireAdmin, requireStaff: requireAdmin }));
 
 import { POST } from "@/app/api/deliveries/import/route";
 import { canonicalRowsJson } from "@/lib/delivery-import";
@@ -47,6 +49,7 @@ let batches: BatchStore;
 
 beforeEach(() => {
   vi.clearAllMocks();
+  db.deliveryZone.findMany.mockResolvedValue([]);
   vi.spyOn(console, "error").mockImplementation(() => {});
   requireAdmin.mockResolvedValue({ id: "u1", name: "Owner", role: "ADMIN", organizationId: "org1" });
   db.organization.findUnique.mockResolvedValue({ planRecord: plan(), defaultPickupAddress: "Warehouse 3, Tejgaon, Dhaka", timezone: "Asia/Dhaka" });
@@ -65,6 +68,7 @@ beforeEach(() => {
     "organizationId_idempotencyKey" in where ? batches.byKey : batches.byHash
   );
   db.auditLog.findFirst.mockResolvedValue(null);
+  db.webhookEndpoint.findMany.mockResolvedValue([]);
 });
 
 describe("mapped-rows preview", () => {

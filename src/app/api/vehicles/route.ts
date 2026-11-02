@@ -1,7 +1,7 @@
 import { Prisma } from "@prisma/client";
 import { db } from "@/lib/db";
 import { assertPlanLimit } from "@/lib/plans";
-import { ApiError, fail, ok, readJson, requireAdmin } from "@/lib/api-helpers";
+import { ApiError, fail, ok, readJson, requireStaff } from "@/lib/api-helpers";
 import { createVehicleSchema, firstError } from "@/lib/validation";
 import { TX_OPTIONS } from "@/lib/delivery";
 import { auditData } from "@/lib/notify";
@@ -11,7 +11,7 @@ const DUPLICATE_REGISTRATION = "A vehicle with this registration number already 
 // GET /api/vehicles — org fleet with active job + all-time assignment counts (admin)
 export async function GET() {
   try {
-    const user = await requireAdmin();
+    const user = await requireStaff();
     const [vehicles, activeCounts] = await Promise.all([
       db.vehicle.findMany({
         where: { organizationId: user.organizationId },
@@ -47,7 +47,7 @@ export async function GET() {
 // POST /api/vehicles — register a vehicle (admin)
 export async function POST(req: Request) {
   try {
-    const user = await requireAdmin();
+    const user = await requireStaff();
     const parsed = createVehicleSchema.safeParse(await readJson<unknown>(req));
     if (!parsed.success) throw new ApiError(400, firstError(parsed.error));
     const data = parsed.data;

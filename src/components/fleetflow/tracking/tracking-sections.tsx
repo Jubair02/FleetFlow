@@ -1,13 +1,12 @@
 "use client";
 
 import { useState } from "react";
-import { ArrowUpRight, CalendarDays, ChevronDown, MapPin, Phone, User } from "lucide-react";
+import { ArrowUpRight, Banknote, CalendarDays, ChevronDown, MapPin, Phone, User } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { formatDate, formatDateTime } from "@/lib/format";
-import type { TrackingData } from "@/lib/types";
+import type { TrackingData } from "@/lib/tracking";
 import { Button } from "@/components/ui/button";
-import { eventTime, mapsUrl, telHref, TRACK_EVENT_LABELS } from "./tracking-model";
-import { ENTER, Surface } from "./tracking-ui";
+import { codPaid, eventLabel, eventTime, mapsUrl, telHref, type TrackingFormat } from "./tracking-model";
+import { ENTER, Surface, accentButton, accentText } from "./tracking-ui";
 
 // ─────────────────────────────────────────────────────────────
 // Details: recipient, address (+ maps), call the sender
@@ -30,48 +29,62 @@ function DetailRow({ icon, label, children }: { icon: React.ReactNode; label: st
   );
 }
 
-export function TrackingDetails({ data }: { data: TrackingData }) {
+export function TrackingDetails({ data, f }: { data: TrackingData; f: TrackingFormat }) {
   const { sender } = data;
+  const branded = !!data.branding?.color;
   return (
     <Surface aria-labelledby="tracking-details" className={cn("p-5 sm:p-6", ENTER)}>
       <h2 id="tracking-details" className="text-sm font-semibold">
-        Delivery details
+        {f.t.detailsHeading}
       </h2>
       <dl className="mt-4 flex flex-col gap-4">
-        <DetailRow icon={<User className="size-4" />} label="Recipient">
+        <DetailRow icon={<User className="size-4" />} label={f.t.recipient}>
           <span className="font-medium">{data.recipientName}</span>
         </DetailRow>
-        <DetailRow icon={<MapPin className="size-4" />} label="Delivery address">
+        <DetailRow icon={<MapPin className="size-4" />} label={f.t.deliveryAddress}>
           <span className="block leading-relaxed">{data.deliveryAddress}</span>
           <a
             href={mapsUrl(data.deliveryAddress)}
             target="_blank"
             rel="noopener noreferrer"
-            className="-ml-1 inline-flex min-h-11 items-center gap-1 rounded-md px-1 text-sm font-medium text-emerald-700 underline-offset-4 outline-none hover:underline focus-visible:ring-[3px] focus-visible:ring-ring/50 dark:text-emerald-400"
+            className={cn(
+              "-ml-1 inline-flex min-h-11 items-center gap-1 rounded-md px-1 text-sm font-medium underline-offset-4 outline-none hover:underline focus-visible:ring-[3px] focus-visible:ring-ring/50",
+              accentText(branded),
+            )}
           >
-            Open in Maps
+            {f.t.openInMaps}
             <ArrowUpRight className="size-4" aria-hidden="true" />
-            <span className="sr-only">(opens in a new tab)</span>
+            <span className="sr-only">{f.t.opensNewTab}</span>
           </a>
         </DetailRow>
-        <DetailRow icon={<CalendarDays className="size-4" />} label="Order placed">
-          <time dateTime={data.createdAt} className="tabular-nums">
-            {formatDate(data.createdAt)}
+        <DetailRow icon={<CalendarDays className="size-4" />} label={f.t.orderPlaced}>
+          <time dateTime={data.createdAt} className="tabular-nums" suppressHydrationWarning>
+            {f.fullDate(new Date(data.createdAt))}
           </time>
         </DetailRow>
+        {codPaid(data) && data.codAmount ? (
+          <DetailRow icon={<Banknote className="size-4" />} label={f.t.payment}>
+            <span className="font-medium">{f.t.codPaid}</span>
+            <span className="text-muted-foreground tabular-nums"> · {f.money(data.codAmount)}</span>
+          </DetailRow>
+        ) : null}
       </dl>
 
       {sender.phone ? (
-        <div className="mt-5 rounded-xl bg-emerald-50 p-4 ring-1 ring-emerald-100 ring-inset dark:bg-emerald-950/40 dark:ring-emerald-900/50">
-          <p className="text-sm font-semibold">Questions about this delivery?</p>
-          <p className="mt-0.5 text-sm text-pretty text-muted-foreground">{sender.name} can help with timing or anything else about your parcel.</p>
-          <Button
-            asChild
-            className="mt-3 h-12 w-full min-w-0 rounded-xl bg-emerald-700 text-[15px] text-white shadow-sm hover:bg-emerald-800 dark:bg-emerald-700 dark:hover:bg-emerald-600"
-          >
+        <div
+          className={cn(
+            "mt-5 rounded-xl p-4 ring-1 ring-inset",
+            branded
+              ? "bg-[color-mix(in_srgb,var(--brand)_8%,transparent)] ring-[color-mix(in_srgb,var(--brand)_20%,transparent)]"
+              : "bg-emerald-50 ring-emerald-100 dark:bg-emerald-950/40 dark:ring-emerald-900/50",
+          )}
+        >
+          <p className="text-sm font-semibold">{f.t.questionsTitle}</p>
+          <p className="mt-0.5 text-sm text-pretty text-muted-foreground">{f.t.questionsBody(sender.name)}</p>
+          <Button asChild className={cn("mt-3 h-12 w-full min-w-0 rounded-xl text-[15px]", accentButton(branded))}>
             <a href={telHref(sender.phone)}>
               <Phone className="size-4" aria-hidden="true" />
-              <span className="truncate">Call {sender.name}</span>
+              <span className="truncate">{f.t.callSender(sender.name)}</span>
             </a>
           </Button>
           <p className="mt-2 text-center text-xs text-muted-foreground tabular-nums">{sender.phone}</p>
@@ -94,7 +107,7 @@ function dotColor(eventType: string, newest: boolean): string {
   return "bg-zinc-300 dark:bg-zinc-600";
 }
 
-export function TrackingTimeline({ data, now }: { data: TrackingData; now: number }) {
+export function TrackingTimeline({ data, now, f }: { data: TrackingData; now: number; f: TrackingFormat }) {
   const [expanded, setExpanded] = useState(false);
   const events = data.timeline.slice().reverse(); // newest first
   const visible = expanded ? events : events.slice(0, INITIAL_VISIBLE);
@@ -104,17 +117,17 @@ export function TrackingTimeline({ data, now }: { data: TrackingData; now: numbe
     <Surface aria-labelledby="tracking-updates" className={cn("p-5 sm:p-6", ENTER)}>
       <div className="flex items-baseline justify-between gap-3">
         <h2 id="tracking-updates" className="text-sm font-semibold">
-          Delivery updates
+          {f.t.updatesHeading}
         </h2>
         {events.length > 0 ? (
           <span className="text-xs text-muted-foreground tabular-nums">
-            {events.length} {events.length === 1 ? "update" : "updates"}
+            {f.t.updatesCount(events.length, f.number(events.length))}
           </span>
         ) : null}
       </div>
 
       {events.length === 0 ? (
-        <p className="mt-4 text-sm text-muted-foreground">No updates yet.</p>
+        <p className="mt-4 text-sm text-muted-foreground">{f.t.noUpdates}</p>
       ) : (
         <ol className="mt-5">
           {visible.map((ev, i) => {
@@ -128,9 +141,14 @@ export function TrackingTimeline({ data, now }: { data: TrackingData; now: numbe
                 </div>
                 <div className={cn("min-w-0 flex-1", !isLast && "pb-5")}>
                   <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5">
-                    <p className={cn("text-sm", newest ? "font-semibold" : "font-medium")}>{TRACK_EVENT_LABELS[ev.eventType] ?? ev.eventType}</p>
-                    <time dateTime={ev.timestamp} title={formatDateTime(ev.timestamp)} className="text-xs text-muted-foreground tabular-nums">
-                      {eventTime(ev.timestamp, now)}
+                    <p className={cn("text-sm", newest ? "font-semibold" : "font-medium")}>{eventLabel(ev.eventType, f)}</p>
+                    <time
+                      dateTime={ev.timestamp}
+                      title={f.dateTime(new Date(ev.timestamp))}
+                      className="text-xs text-muted-foreground tabular-nums"
+                      suppressHydrationWarning
+                    >
+                      {eventTime(ev.timestamp, now, f)}
                     </time>
                   </div>
                   {ev.note ? (
@@ -153,7 +171,7 @@ export function TrackingTimeline({ data, now }: { data: TrackingData; now: numbe
           onClick={() => setExpanded((v) => !v)}
           aria-expanded={expanded}
         >
-          {expanded ? "Show fewer updates" : `Show all ${events.length} updates`}
+          {expanded ? f.t.showFewer : f.t.showAll(f.number(events.length))}
           <ChevronDown className={cn("size-4 transition-transform duration-200", expanded && "rotate-180")} aria-hidden="true" />
         </Button>
       ) : null}

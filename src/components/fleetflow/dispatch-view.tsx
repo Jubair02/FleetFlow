@@ -32,6 +32,7 @@ import { BulkBar, QueuePanel } from "@/components/fleetflow/dispatch/queue-panel
 import { RoadPanel } from "@/components/fleetflow/dispatch/road-panel";
 import { FleetPanel } from "@/components/fleetflow/dispatch/fleet-rail";
 import { BulkAssignDialog } from "@/components/fleetflow/dispatch/bulk-assign-dialog";
+import { RouteDialog } from "@/components/fleetflow/dispatch/route-dialog";
 import { isDriverFree, type ActiveAssignment } from "@/components/fleetflow/dispatch/helpers";
 
 type Tab = "queue" | "road";
@@ -96,6 +97,9 @@ export function DispatchView() {
   const [selected, setSelected] = useState<Set<string>>(() => new Set());
   const [bulkTargets, setBulkTargets] = useState<Delivery[]>([]);
   const [bulkOpen, setBulkOpen] = useState(false);
+  // Route planner target is kept while the dialog animates closed.
+  const [routeDriver, setRouteDriver] = useState<{ id: string; name: string } | null>(null);
+  const [routeOpen, setRouteOpen] = useState(false);
 
   // ── Live refresh ────────────────────────────────────────────
   const [nowMs, setNowMs] = useState(() => Date.now());
@@ -264,7 +268,7 @@ export function DispatchView() {
             <div className="flex flex-wrap items-center gap-2">
               <TabsList className="h-11 w-full rounded-xl bg-muted/70 p-1 sm:w-fit dark:bg-white/5">
                 <TabsTrigger value="queue" className="rounded-lg px-4 text-sm data-[state=active]:shadow-sm">
-                  Queue <span className="tabular-nums text-muted-foreground">({unassigned.length})</span>
+                  Queue <span className="tabular-nums text-muted-foreground">({data?.queueTotal ?? unassigned.length})</span>
                 </TabsTrigger>
                 <TabsTrigger value="road" className="rounded-lg px-4 text-sm data-[state=active]:shadow-sm">
                   On the road <span className="tabular-nums text-muted-foreground">({assignments.length})</span>
@@ -286,6 +290,7 @@ export function DispatchView() {
             <TabsContent value="queue" forceMount className="data-[state=inactive]:hidden">
               <QueuePanel
                 queue={unassigned}
+                total={data?.queueTotal}
                 nowMs={nowMs}
                 selected={effectiveSelected}
                 onToggle={toggle}
@@ -303,6 +308,10 @@ export function DispatchView() {
                 onUnassign={(a) => {
                   setUnassignTarget(a);
                   setUnassignReason("");
+                }}
+                onOpenRoute={(d) => {
+                  setRouteDriver(d);
+                  setRouteOpen(true);
                 }}
               />
             </TabsContent>
@@ -329,6 +338,8 @@ export function DispatchView() {
 
       {/* Assign dialog (opened from queue rows) */}
       <AssignDialog delivery={assignTarget} open={assignOpen} onOpenChange={setAssignOpen} />
+
+      <RouteDialog driver={routeDriver} open={routeOpen} onOpenChange={setRouteOpen} />
 
       <BulkAssignDialog
         open={bulkOpen}

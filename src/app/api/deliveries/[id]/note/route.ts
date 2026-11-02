@@ -1,5 +1,6 @@
 import { db } from "@/lib/db";
 import { ApiError, fail, ok, readJson, requireUser } from "@/lib/api-helpers";
+import { isStaffRole } from "@/lib/roles";
 import { noteSchema, firstError } from "@/lib/validation";
 import { TX_OPTIONS, lockDelivery } from "@/lib/delivery";
 import { auditData } from "@/lib/notify";
@@ -17,8 +18,8 @@ export async function POST(req: Request, { params }: Params) {
     const parsed = noteSchema.safeParse(await readJson<unknown>(req));
     if (!parsed.success) throw new ApiError(400, firstError(parsed.error));
     const { note, customerVisible } = parsed.data;
-    // only admins may publish customer-visible notes
-    const visible = user.role === "ADMIN" ? customerVisible : false;
+    // only staff may publish customer-visible notes
+    const visible = isStaffRole(user.role) ? customerVisible : false;
 
     const event = await db.$transaction(async (tx) => {
       await lockDelivery(tx, id, user.organizationId);
@@ -27,7 +28,7 @@ export async function POST(req: Request, { params }: Params) {
         include: { assignments: { where: { active: true } } },
       });
 
-      if (user.role !== "ADMIN") {
+      if (!isStaffRole(user.role)) {
         const mine = delivery.assignments.some((a) => a.driverId === user.id);
         if (!mine) throw new ApiError(403, "You can only add notes to your own deliveries");
       }

@@ -1,9 +1,11 @@
 import { Prisma } from "@prisma/client";
 import { db } from "@/lib/db";
-import { ApiError, fail, ok, readJson, requireAdmin } from "@/lib/api-helpers";
+import { ApiError, fail, ok, readJson, requireStaff } from "@/lib/api-helpers";
 import { assignSchema, firstError } from "@/lib/validation";
 import { TX_OPTIONS, lockDelivery, lockDriver, lockVehicle, syncDriverAvailability } from "@/lib/delivery";
 import { auditData, bestEffort, notifyInApp, notifyEmail } from "@/lib/notify";
+import { assertCanGrow } from "@/lib/plans";
+import { dispatchWebhooksSoon, queueDeliveryStatusChange } from "@/lib/webhooks";
 
 type Params = { params: Promise<{ id: string }> };
 
@@ -15,7 +17,7 @@ type Params = { params: Promise<{ id: string }> };
 // sees the first one's assignment.
 export async function POST(req: Request, { params }: Params) {
   try {
-    const user = await requireAdmin();
+    const user = await requireStaff();
     const { id } = await params;
 
     const parsed = assignSchema.safeParse(await readJson<unknown>(req));
@@ -24,6 +26,8 @@ export async function POST(req: Request, { params }: Params) {
 
     try {
       const result = await db.$transaction(async (tx) => {
+        // Read-only companies (trial/subscription over) can't dispatch new work.
+        await assertCanGrow(tx, user.organizationId);
         // 1) Delivery must exist in this org, be dispatchable and not already assigned
         await lockDelivery(tx, id, user.organizationId);
         const delivery = await tx.delivery.findUniqueOrThrow({
@@ -98,6 +102,7 @@ export async function POST(req: Request, { params }: Params) {
         });
         // driver availability follows their active jobs (AVAILABLE → ON_ROUTE)
         await syncDriverAvailability(tx, driverId);
+        await queueDeliveryStatusChange(tx, user.organizationId, delivery.id, delivery.status, "ASSIGNED", { assigned: true });
         return { delivery, driver, vehicle, assignment };
       }, TX_OPTIONS);
 
@@ -124,6 +129,7 @@ export async function POST(req: Request, { params }: Params) {
         ])
       );
 
+      dispatchWebhooksSoon(user.organizationId);
       return ok({ success: true, assignmentId: result.assignment.id });
     } catch (txError) {
       // Serialization/write conflicts are unlikely with row locks, but still map cleanly

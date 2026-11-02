@@ -1,7 +1,7 @@
 import { Prisma } from "@prisma/client";
 import { db } from "@/lib/db";
 import { assertPlanLimit } from "@/lib/plans";
-import { ApiError, fail, ok, readJson, requireAdmin } from "@/lib/api-helpers";
+import { ApiError, fail, ok, readJson, requireStaff } from "@/lib/api-helpers";
 import { updateVehicleSchema, firstError } from "@/lib/validation";
 import { lockVehicle, TX_OPTIONS } from "@/lib/delivery";
 import { auditData } from "@/lib/notify";
@@ -13,7 +13,7 @@ const DUPLICATE_REGISTRATION = "A vehicle with this registration number already 
 // PATCH /api/vehicles/[id] — update vehicle / change status (admin)
 export async function PATCH(req: Request, { params }: Params) {
   try {
-    const user = await requireAdmin();
+    const user = await requireStaff();
     const { id } = await params;
 
     const parsed = updateVehicleSchema.safeParse(await readJson<unknown>(req));
@@ -83,7 +83,7 @@ export async function PATCH(req: Request, { params }: Params) {
 // DELETE /api/vehicles/[id] — only vehicles with no assignment history (admin)
 export async function DELETE(_req: Request, { params }: Params) {
   try {
-    const user = await requireAdmin();
+    const user = await requireStaff();
     const { id } = await params;
 
     await db.$transaction(async (tx) => {

@@ -291,7 +291,6 @@ async function main() {
   await V(north.id, "CTG-9912", "VAN", "1.2 t / 8 m³", "MAINTENANCE", "AC repair");
 
   // ── audit helper ──────────────────────────────────────────
-  let auditSeq = 0;
   const audit = (actorId: string, actorName: string, action: string, entityType: string, entityId: string, detail: object, at: Date) =>
     db.auditLog.create({
       data: { organizationId: swift.id, actorId, actorName, action, entityType, entityId, detail: JSON.stringify(detail), createdAt: at },

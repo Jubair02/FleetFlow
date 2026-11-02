@@ -3,6 +3,7 @@ import { ApiError, fail, ok, readJson, requireAdmin, requireUser } from "@/lib/a
 import { updateOrgSchema, firstError } from "@/lib/validation";
 import { TX_OPTIONS } from "@/lib/delivery";
 import { auditData } from "@/lib/notify";
+import { parseDeliveryPoint } from "@/lib/geocoding";
 import { toPlanDefinition } from "@/lib/plans";
 import type { OrgPlanInfo } from "@/lib/types-org";
 import type { Organization, Prisma } from "@prisma/client";
@@ -15,6 +16,8 @@ const ORG_FIELDS = {
   contactEmail: true,
   address: true,
   defaultPickupAddress: true,
+  pickupLat: true,
+  pickupLng: true,
   timezone: true,
   createdAt: true,
 } as const;
@@ -68,6 +71,14 @@ export async function PATCH(req: Request) {
         }
         const next = value === "" ? null : value;
         if (next !== current[key]) data[key] = next;
+      }
+      // depot pin on the map: both halves or neither (null removes it)
+      if (input.pickupLat !== undefined || input.pickupLng !== undefined) {
+        const point = parseDeliveryPoint(input.pickupLat, input.pickupLng, "pickup point");
+        if ((point?.lat ?? null) !== current.pickupLat || (point?.lng ?? null) !== current.pickupLng) {
+          data.pickupLat = point?.lat ?? null;
+          data.pickupLng = point?.lng ?? null;
+        }
       }
       if (Object.keys(data).length === 0) return current;
 

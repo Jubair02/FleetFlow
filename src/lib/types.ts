@@ -1,3 +1,5 @@
+import type { UserRole } from "@/lib/roles";
+import type { SubscriptionAccess } from "@/lib/subscription";
 // ─────────────────────────────────────────────────────────────
 // Frontend API contract types — mirror of the REST responses
 //
@@ -23,12 +25,18 @@ export interface SessionUser {
   id: string;
   name: string;
   email: string;
-  role: "ADMIN" | "DRIVER";
+  role: UserRole;
   organizationId: string;
   organizationName: string;
+  /** The company's IANA timezone — every date in the app is shown in it (src/lib/format.ts). */
+  timezone: string;
   driverProfile: DriverProfileInfo | null;
   /** Set after an admin creates/resets the password — the app forces a change. */
   mustChangePassword: boolean;
+  /** The account that created the company. */
+  isOwner: boolean;
+  /** Trial / subscription state for banners; the server enforces it (src/lib/plans.ts). */
+  subscription: SubscriptionAccess;
 }
 
 export interface AssignmentInfo {
@@ -61,8 +69,48 @@ export interface Delivery {
   completedAt: string | null;
   createdAt: string;
   updatedAt: string;
+  /** Cash on delivery (whole BDT); null = prepaid. */
+  codAmount: number | null;
+  codCollectedAmount: number | null;
+  codCollectedAt: string | null;
+  /** True once the collected cash was handed over to the office. */
+  codSettled: boolean;
+  /** Stop number in the assigned driver's planned route (1 = first); null/absent = not planned. */
+  routeSeq?: number | null;
+  /** Planned arrival estimate (ISO); null/absent = not planned or no map location. */
+  plannedEta?: string | null;
   assignment: AssignmentInfo | null;
   podCount: number;
+  /** Map point and who set it (GEOCODED | PIN | DRIVER | API); null/absent = not located yet. */
+  location?: { lat: number; lng: number; source: string | null } | null;
+  /** Zone & delivery charge (docs/ZONES.md); null/absent in driver views. */
+  charge?: DeliveryCharge | null;
+  /** Customer rating + reschedule request (docs/CUSTOMER-EXPERIENCE.md); null/absent in driver views. */
+  customer?: DeliveryCustomerFeedback | null;
+}
+
+export interface DeliveryCustomerFeedback {
+  rating: { score: number; comment: string | null; ratedAt: string | null } | null;
+  reschedule: {
+    /** PENDING | ACCEPTED | DECLINED */
+    status: string;
+    requestedFor: string | null;
+    /** ANY | MORNING | AFTERNOON | EVENING */
+    window: string | null;
+    note: string | null;
+    requestedAt: string | null;
+    resolvedAt: string | null;
+  } | null;
+}
+
+export interface DeliveryCharge {
+  zoneId: string | null;
+  zoneName: string | null;
+  weightKg: number | null;
+  /** Whole BDT; null = no zone matched / no price. */
+  deliveryFeeBdt: number | null;
+  /** True = typed by staff, never recalculated. */
+  feeOverridden: boolean;
 }
 
 export interface DeliveryEventItem {
@@ -97,6 +145,8 @@ export interface PodItem {
   mimeType: string;
   capturedAt: string;
   uploadedById: string | null;
+  /** Where the driver was when capturing proof, if the browser shared it. */
+  location: { latitude: number; longitude: number; accuracyM: number | null } | null;
 }
 
 export interface DeliveryDetail {
@@ -112,6 +162,8 @@ export interface DeliveriesPage {
   page: number;
   pageSize: number;
   pageCount: number;
+  /** Requests waiting for an answer across the organization (not just this page). */
+  pendingReschedules?: number;
 }
 
 export interface DriverItem {
@@ -164,6 +216,8 @@ export interface DispatchVehicle {
 
 export interface DispatchData {
   unassigned: Delivery[];
+  /** Deliveries waiting in the queue — more than unassigned.length when the list is capped. */
+  queueTotal?: number;
   assignments: (AssignmentHistoryItem & { delivery: Delivery })[];
   drivers: DispatchDriver[];
   vehicles: DispatchVehicle[];
@@ -238,6 +292,9 @@ export interface DashboardData {
     maintenanceVehicles: { id: string; registrationNumber: string; type: string; status: string; notes: string | null }[];
     /** Most overdue first, capped at 5 — the true count is `now.overdue`. */
     overdueDeliveries?: { id: string; trackingCode: string; recipientName: string; status: string; expectedAt: string | null }[];
+    /** Customer reschedule requests waiting for an answer (true count + first 5, oldest first). */
+    rescheduleCount?: number;
+    rescheduleRequests?: { id: string; trackingCode: string; requestedFor: string | null }[];
   };
   driverWorkload: { id: string; name: string; active: boolean; availability: string; activeJobs: number; maxActiveJobs: number }[];
 }
@@ -288,15 +345,28 @@ export interface ReportDriverRow {
   onTimeRate: number | null;
   avgRoadHours: number | null;
   roadTimeExcluded: number;
+  /** Customer rating of the deliveries this driver delivered (1 decimal); null = none rated. */
+  avgRating?: number | null;
+  ratingCount?: number;
 }
 
 export interface ReportData {
   summary: ReportSummary;
   /** Number of matching deliveries; `items` may be capped unless export=1. */
   itemsTotal: number;
+  /** Timing metrics and the driver breakdown only used the most recent rows (very large range). */
+  metricsTruncated?: boolean;
   driverBreakdown: ReportDriverRow[];
+  /** Customer ratings from the tracking page (deliveries in range): count, average, 1–5 distribution. */
+  ratings?: { count: number; average: number | null; distribution: [number, number, number, number, number] };
   /** Currently FAILED deliveries in range, grouped by reason (largest first). */
   failureReasons: { reason: string; label: string; count: number }[];
+  /** Delivery charges in range (docs/ZONES.md): cancelled deliveries excluded; per zone, largest first. */
+  charges?: {
+    totalChargesBdt: number;
+    deliveredChargesBdt: number;
+    byZone: { zoneId: string | null; zoneName: string; deliveries: number; delivered: number; chargesBdt: number; deliveredChargesBdt: number }[];
+  };
   daily: { date: string; total: number; completed: number; failed: number }[];
   items: {
     id: string;
@@ -313,6 +383,9 @@ export interface ReportData {
     failureReason: string | null;
     driverName: string | null;
     vehicleRegistration: string | null;
+    zoneName?: string | null;
+    /** Delivery charge, whole BDT; null = not priced. */
+    deliveryFeeBdt?: number | null;
   }[];
 }
 

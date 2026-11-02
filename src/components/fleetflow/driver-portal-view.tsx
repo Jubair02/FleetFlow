@@ -7,6 +7,7 @@ import { cn } from "@/lib/utils";
 import { api, useApiData } from "@/lib/api-client";
 import { useAppStore } from "@/store/app-store";
 import type { MyJob } from "@/lib/types";
+import { LocationSharingIndicator, useLocationSharing } from "@/components/fleetflow/driver/location-sharing";
 import {
   CaughtUpState,
   ErrorCard,
@@ -22,7 +23,7 @@ import { JobDetailDialog } from "@/components/fleetflow/driver/job-detail-dialog
 import { PodDialog } from "@/components/fleetflow/driver/pod-dialog";
 import { ReportProblemDialog } from "@/components/fleetflow/driver/report-problem-dialog";
 import {
-  byUrgency,
+  byRoute,
   firstName,
   greeting,
   isOverdue,
@@ -31,6 +32,9 @@ import {
   now,
   type Transition,
 } from "@/components/fleetflow/driver/job-utils";
+
+/** How often the open job list refreshes itself (ms). */
+const REFRESH_MS = 30_000;
 
 // ─────────────────────────────────────────────────────────────
 // Driver portal view — Jobs (driver-jobs) and History (driver-history).
@@ -76,7 +80,10 @@ function DriverPortalView() {
   const [podJob, setPodJob] = useState<MyJob | null>(null);
   const [reportJob, setReportJob] = useState<MyJob | null>(null);
 
-  const active = useApiData<{ items: MyJob[] }>("/api/my/jobs");
+  // Keep the job list current without a manual refresh: poll while visible
+  // (the request cache pauses it while hidden or offline), and catch up when
+  // the driver returns to the app (focus) or regains signal (reconnect).
+  const active = useApiData<{ items: MyJob[] }>("/api/my/jobs", { refreshInterval: REFRESH_MS, revalidateOnFocus: true });
   // History also feeds the "Delivered today" stat on the Jobs page.
   const history = useApiData<{ items: MyJob[] }>("/api/my/jobs?scope=history");
 
@@ -102,7 +109,9 @@ function DriverPortalView() {
     onOpenDetail: (job) => focusDelivery(job.id),
   };
 
-  const activeItems = (active.data?.items ?? []).slice().sort(byUrgency);
+  const activeItems = (active.data?.items ?? []).slice().sort(byRoute);
+  // live location for dispatch / the customer, only while a job is picked up or in transit
+  const sharing = useLocationSharing(activeItems.some((j) => j.status === "PICKED_UP" || j.status === "IN_TRANSIT"));
   const [nextStop, ...upNext] = activeItems;
   const overdueCount = activeItems.filter(isOverdue).length;
   const deliveredToday = history.data
@@ -162,6 +171,7 @@ function DriverPortalView() {
 
   return (
     <div className="mx-auto w-full max-w-6xl">
+      {!isHistory && <LocationSharingIndicator state={sharing} />}
       {isHistory ? (
         <HistoryPanel
           items={history.data?.items ?? null}

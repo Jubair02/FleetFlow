@@ -8,6 +8,7 @@
 //   E2E_BASE_URL=http://localhost:3001 E2E_DATABASE_URL="<disposable db url>" \
 //     node tests/e2e/auth.e2e.mjs
 import { execFileSync } from "child_process";
+import { completePlatformMfa } from "./mfa.mjs";
 
 const BASE = process.env.E2E_BASE_URL;
 const DB_URL = process.env.E2E_DATABASE_URL;
@@ -63,6 +64,13 @@ async function main() {
   check("super admin via the shared login → platform", r.status === 200 && r.data.kind === "platform" && r.data.redirectTo === "/platform", r.data);
   check("staff login sets only the platform session", !!staff.cookies.ff_platform_session && !staff.cookies.ff_session, Object.keys(staff.cookies));
   check("login response has no secrets", !HASH_LIKE.test(r.text) && !/passwordHash/.test(r.text));
+  check("first staff sign-in asks for two-factor enrolment", r.data.mfa === "enroll", r.data);
+  let pending = await staff.get("/platform");
+  check("password-only staff session can't open /platform", isRedirect(pending) && pathOf(pending.location) === "/?next=platform", [pending.status, pending.location]);
+  pending = await staff.get("/api/platform/overview");
+  check("password-only staff session can't use platform APIs", pending.status === 401, pending.status);
+  const mfa = await completePlatformMfa(staff, staffEmail, r.data);
+  check("authenticator enrolment completes staff sign-in (10 backup codes)", mfa.status === 200 && mfa.data.backupCodes?.length === 10, mfa.data);
   const admin = new Client();
   r = await admin.login("admin@fleetflow.test", "Admin123!");
   check("company admin via the shared login → company workspace", r.status === 200 && r.data.kind === "tenant" && r.data.redirectTo === "/" && r.data.user?.role === "ADMIN", r.data);
@@ -87,7 +95,9 @@ async function main() {
   r = await staff.get("/");
   check("staff on / → redirected to /platform", isRedirect(r) && pathOf(r.location) === "/platform", [r.status, r.location]);
   r = await staff.get("/?track=some-token");
-  check("tracking links are never redirected", r.status === 200, r.status);
+  check("legacy tracking links → /track/<token> (never to /platform)", isRedirect(r) && pathOf(r.location) === "/track/some-token", [r.status, r.location]);
+  r = await staff.get("/track/some-token");
+  check("tracking page renders for anyone", r.status === 200, r.status);
   r = await admin.get("/");
   check("company admin on / → company app", r.status === 200, r.status);
   r = await anon.get("/?next=https://evil.example");
@@ -111,7 +121,7 @@ async function main() {
   check("company password for that email → company workspace, not platform", r.data.kind === "tenant", r.data);
   const staff2 = new Client();
   r = await staff2.login(staffEmail, staffPassword);
-  check("staff password for that email → platform", r.data.kind === "platform", r.data);
+  check("staff password for that email → platform", r.data.kind === "platform" && r.data.mfa === "verify", r.data);
   r = await new Client().post("/api/auth/signup", { companyName: `Role Probe ${stamp}`, name: "Yasmin", email: `z-${stamp}@x.test`, password: "Zzzzzzzz-1", role: "SUPER_ADMIN", isPlatformAdmin: true });
   check("extra role fields in sign-up are ignored (still a company admin)", r.status === 201 && r.data.user?.role === "ADMIN", r.data);
 

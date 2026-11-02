@@ -7,10 +7,11 @@ import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Skeleton } from "@/components/ui/skeleton";
 import { ApiRequestError, useApiData } from "@/lib/api-client";
-import { formatDate } from "@/lib/format";
+import { formatDate, formatBdt } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import type { OrgPlanInfo } from "@/lib/types-org";
 import { goToSettings } from "@/store/app-store";
+import { InvoicesPanel } from "@/components/fleetflow/billing/invoices-panel";
 // Plan types & feature catalog from the client-safe module; live plan data comes from the API.
 import {
   FEATURE_KEYS,
@@ -58,9 +59,7 @@ export const PROPOSED_PRICING_NOTE = "Proposed prices in BDT — not final, for 
 const CYCLE_LABELS: Record<BillingCycle, string> = { MONTHLY: "Monthly", ANNUAL: "Annual" };
 const SUBSCRIPTION_LABELS: Record<string, string> = { TRIAL: "Trial", ACTIVE: "Active", PAST_DUE: "Past due", CANCELLED: "Cancelled" };
 
-export function formatBdt(amount: number): string {
-  return `৳${amount.toLocaleString("en-US")}`;
-}
+export { formatBdt };
 
 function formatCyclePrice(amount: number | null, cycle: BillingCycle): string {
   return amount == null ? "Free" : `${formatBdt(amount)} / ${cycle === "ANNUAL" ? "year" : "month"}`;
@@ -94,6 +93,10 @@ const UPGRADE_COPY: Record<FeatureKey, { title: string; action: string }> = {
   csv_import: { title: "Upgrade to import deliveries", action: "bulk-import deliveries from a CSV file" },
   report_export: { title: "Upgrade to export reports", action: "download reports as CSV" },
   customer_emails: { title: "Upgrade to email customers", action: "email recipients their tracking link and delivery outcome" },
+  customer_sms: { title: "Upgrade to text customers", action: "text recipients their tracking link and delivery outcome" },
+  api_access: { title: "Upgrade to use the API", action: "connect your store or systems with API keys and webhooks" },
+  live_map: { title: "Upgrade for the live map", action: "see drivers live, optimise routes and give customers arrival estimates" },
+  branded_tracking: { title: "Upgrade to brand tracking pages", action: "show your logo and colour on customer tracking pages" },
 };
 
 /** Body of the "this feature isn't in your plan" explainer — inline or inside UpgradeDialog. */
@@ -113,7 +116,7 @@ export function UpgradeExplainer({ feature, planName, message, className }: { fe
         </div>
       </div>
       <p className="text-xs text-muted-foreground">
-        There&apos;s nothing to pay online — contact the FleetFlow team and we&apos;ll switch your plan. Your data stays exactly as it is.
+        Request an invoice in Settings → Plan &amp; billing and pay by bKash, Nagad or bank transfer. Your data stays exactly as it is.
       </p>
     </div>
   );
@@ -344,7 +347,7 @@ export function PlanCards({
           );
         })}
       </div>
-      <p className="text-xs text-muted-foreground">{PROPOSED_PRICING_NOTE}. No online payment — plans are changed by the FleetFlow team.</p>
+      <p className="text-xs text-muted-foreground">{PROPOSED_PRICING_NOTE}. Pay by bKash, Nagad or bank transfer — no card needed.</p>
     </div>
   );
 }
@@ -384,9 +387,9 @@ function SectionHeading({ id, title, children }: { id: string; title: string; ch
 }
 
 const UPGRADE_STEPS = [
-  { title: "Tell us what you need", body: "Contact the FleetFlow team with the plan and billing cycle (monthly or annual) you want." },
-  { title: "Pay the invoice", body: "We send an invoice — pay by bKash or bank transfer." },
-  { title: "We switch your plan", body: "As soon as payment is confirmed. Your data stays exactly as it is." },
+  { title: "Request an invoice", body: "Pick a plan and billing cycle (monthly or annual) under Invoices & payment above. Already subscribed? Contact FleetFlow to change plans." },
+  { title: "Pay the invoice", body: "Pay by bKash, Nagad or bank transfer with the invoice number as the reference, then choose “I’ve paid”." },
+  { title: "We switch your plan", body: "As soon as payment is confirmed (within 1 business day). Your data stays exactly as it is." },
 ];
 
 export function PlanPanel() {
@@ -514,6 +517,9 @@ export function PlanPanel() {
         </div>
       </section>
 
+      {/* ── invoices & payment ── */}
+      <InvoicesPanel />
+
       {/* ── usage ── */}
       <section aria-labelledby="plan-usage-title" className="flex flex-col gap-3">
         <SectionHeading id="plan-usage-title" title="Usage">
@@ -534,7 +540,7 @@ export function PlanPanel() {
             <UsageTile key={r} label={resourceLabels[r]} used={usage[r]} limit={plan.limits[r]} />
           ))}
         </ul>
-        {free && <p className="text-xs text-muted-foreground">You are on a free plan. Pick a plan below when you are ready — there is nothing to pay online.</p>}
+        {free && <p className="text-xs text-muted-foreground">You are on a free plan. Request an invoice above when you are ready to subscribe.</p>}
       </section>
 
       {/* ── pricing ── */}
@@ -548,7 +554,7 @@ export function PlanPanel() {
       {/* ── how to upgrade ── */}
       <section className={cn(PANEL, "p-5 sm:p-6")} aria-labelledby="plan-upgrade-title">
         <SectionHeading id="plan-upgrade-title" title="How to upgrade">
-          <p className="text-xs text-muted-foreground">There is no online payment yet</p>
+          <p className="text-xs text-muted-foreground">No card payments — bKash, Nagad or bank transfer</p>
         </SectionHeading>
         <ol className="mt-4 grid gap-4 md:grid-cols-3">
           {UPGRADE_STEPS.map((s, i) => (

@@ -8,6 +8,7 @@
 //   E2E_BASE_URL=http://localhost:3001 E2E_DATABASE_URL="<disposable db url>" \
 //     node tests/e2e/platform.e2e.mjs
 import { execFileSync } from "child_process";
+import { completePlatformMfa } from "./mfa.mjs";
 
 const BASE = process.env.E2E_BASE_URL;
 const DB_URL = process.env.E2E_DATABASE_URL;
@@ -95,6 +96,8 @@ async function main() {
   r = await ops.post("/api/platform/auth/login", { email: superEmail, password: superPassword });
   check("super admin signs in", r.status === 200 && r.data.admin?.email === superEmail, r);
   check("platform login response has no secrets", !HASH_LIKE.test(r.text) && !/passwordHash/.test(r.text));
+  r = await completePlatformMfa(ops, superEmail, r.data);
+  check("super admin completes two-factor enrolment", r.status === 200 && r.data.backupCodes?.length === 10, r.data);
   r = await ops.get("/api/deliveries");
   check("platform session does not grant company API access", r.status === 401, r.status);
 
@@ -104,7 +107,9 @@ async function main() {
   const temp = b.out.match(/\n\s{2}(\S{16})\n/)?.[1];
   check("script prints a generated temporary password once", b.ok && !!temp, b.out);
   const ops2 = new Client();
-  await ops2.post("/api/platform/auth/login", { email: tempEmail, password: temp });
+  r = await ops2.post("/api/platform/auth/login", { email: tempEmail, password: temp });
+  r = await completePlatformMfa(ops2, tempEmail, r.data);
+  check("temporary-password admin completes two-factor first", r.status === 200, r.data);
   r = await ops2.get("/api/platform/overview");
   check("temporary-password admin is blocked until they change it → 403", r.status === 403, r.status);
   r = await ops2.post("/api/platform/auth/password", { currentPassword: temp, newPassword: `Changed-${stamp}-pw` });

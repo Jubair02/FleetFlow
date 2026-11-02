@@ -1,16 +1,19 @@
 import { db } from "@/lib/db";
-import { fail, localDayKey, ok, parseDateParam, parseTzOffset, requireAdmin } from "@/lib/api-helpers";
+import { fail, localDayKey, ok, parseDateParam, parseTzOffset, requireStaff } from "@/lib/api-helpers";
 import { failureReasonLabel } from "@/lib/constants";
 import { assertFeature } from "@/lib/plans";
 import {
   classifyTimeliness,
   driverPerformance,
+  driverRatings,
+  ratingStats,
   durationStats,
   failureReasonCounts,
   onTimeStats,
   roadTimeSpans,
   successRate,
   summarizeStatuses,
+  chargesByZone,
 } from "@/lib/report-metrics";
 import type { Prisma } from "@prisma/client";
 
@@ -18,6 +21,11 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 const MAX_DAILY_DAYS = 92;
 const ITEMS_CAP = 200;
 const EXPORT_CAP = 10_000;
+// Timing metrics and the driver breakdown load one row per delivery/assignment.
+// Without a date range ("all time") that grows forever, so they use the most
+// recent rows only and the response says so (metricsTruncated).
+const METRIC_ROWS_CAP = 20_000;
+const ASSIGNMENT_ROWS_CAP = 50_000;
 
 type DailyRow = { date: string; total: number; completed: number; failed: number };
 
@@ -44,7 +52,7 @@ function dayKeysBetween(firstKey: string, lastKey: string, max: number): string[
 // scoped to the caller's organization through `where` (Delivery.organizationId).
 export async function GET(req: Request) {
   try {
-    const user = await requireAdmin();
+    const user = await requireStaff();
     const url = new URL(req.url);
     const q = (k: string) => url.searchParams.get(k)?.trim() || "";
 
@@ -87,6 +95,8 @@ export async function GET(req: Request) {
       db.delivery.groupBy({ by: ["status"], where, _count: { _all: true } }),
       db.delivery.findMany({
         where: { AND: [where, { status: "DELIVERED" }] },
+        orderBy: [{ completedAt: { sort: "desc", nulls: "last" } }, { id: "desc" }],
+        take: METRIC_ROWS_CAP + 1,
         select: {
           createdAt: true,
           expectedAt: true,
@@ -114,10 +124,13 @@ export async function GET(req: Request) {
             orderBy: [{ assignedAt: "asc" }, { id: "asc" }],
             include: { driver: { select: { name: true } }, vehicle: { select: { registrationNumber: true } } },
           },
+          zone: { select: { name: true } },
         },
       }),
       db.assignment.findMany({
         where: assignmentWhere,
+        orderBy: [{ assignedAt: "desc" }, { id: "desc" }],
+        take: ASSIGNMENT_ROWS_CAP + 1,
         select: {
           driverId: true,
           deliveryId: true,
@@ -129,7 +142,11 @@ export async function GET(req: Request) {
       }),
     ]);
 
-    // ── summary (uncapped: computed over the full filter) ──
+    const metricsTruncated = deliveredRows.length > METRIC_ROWS_CAP || driverAssignments.length > ASSIGNMENT_ROWS_CAP;
+    if (deliveredRows.length > METRIC_ROWS_CAP) deliveredRows.length = METRIC_ROWS_CAP;
+    if (driverAssignments.length > ASSIGNMENT_ROWS_CAP) driverAssignments.length = ASSIGNMENT_ROWS_CAP;
+
+    // ── summary (status counts are uncapped: computed over the full filter) ──
     const counts = summarizeStatuses(statusGroups.map((g) => ({ status: g.status, count: g._count._all })));
     const onTime = onTimeStats(deliveredRows);
     const completion = durationStats(deliveredRows.map((d) => ({ start: d.createdAt, end: d.completedAt })));
@@ -137,6 +154,19 @@ export async function GET(req: Request) {
     const failureReasons = failureReasonCounts(
       failedGroups.map((g) => ({ failureReason: g.failureReason, count: g._count._all }))
     ).map((r) => ({ ...r, label: r.reason === "UNKNOWN" ? "No reason recorded" : failureReasonLabel(r.reason) }));
+
+    // ── customer ratings (tracking page) over the same filtered deliveries ──
+    const ratedRows = await db.delivery.findMany({
+      where: { AND: [where, { rating: { not: null } }] },
+      orderBy: [{ ratedAt: { sort: "desc", nulls: "last" } }, { id: "desc" }],
+      take: METRIC_ROWS_CAP,
+      select: {
+        rating: true,
+        assignments: { where: { outcome: "DELIVERED" }, orderBy: [{ assignedAt: "desc" }, { id: "desc" }], take: 1, select: { driverId: true } },
+      },
+    });
+    const ratings = ratingStats(ratedRows.map((r) => r.rating));
+    const ratingByDriver = driverRatings(ratedRows.map((r) => ({ rating: r.rating, driverId: r.assignments[0]?.driverId ?? null })));
 
     // ── per-driver breakdown (from assignment outcomes) ──
     let perDriver = driverPerformance(driverAssignments);
@@ -149,7 +179,12 @@ export async function GET(req: Request) {
       : [];
     const nameMap = new Map(driverNames.map((u) => [u.id, u.name]));
     const driverBreakdown = perDriver
-      .map((r) => ({ ...r, driverName: nameMap.get(r.driverId) ?? "Unknown driver" }))
+      .map((r) => ({
+        ...r,
+        driverName: nameMap.get(r.driverId) ?? "Unknown driver",
+        avgRating: ratingByDriver.get(r.driverId)?.average ?? null,
+        ratingCount: ratingByDriver.get(r.driverId)?.count ?? 0,
+      }))
       .sort((a, b) => b.assigned - a.assigned || a.driverName.localeCompare(b.driverName));
 
     // ── daily series: one row per local day of the range (max 92 days, latest kept) ──
@@ -175,6 +210,22 @@ export async function GET(req: Request) {
       daily = Array.from(dailyMap.values());
     }
 
+    // ── delivery charges by zone (SQL aggregate over the full filter — never truncated) ──
+    const chargeGroups = await db.delivery.groupBy({
+      by: ["zoneId", "status"],
+      where,
+      _count: { _all: true },
+      _sum: { deliveryFeeBdt: true },
+    });
+    const charges = chargesByZone(
+      chargeGroups.map((g) => ({ zoneId: g.zoneId, status: g.status, count: g._count._all, feeSum: g._sum.deliveryFeeBdt }))
+    );
+    const chargeZoneIds = charges.byZone.map((r) => r.zoneId).filter((id): id is string => !!id);
+    const chargeZones = chargeZoneIds.length
+      ? await db.deliveryZone.findMany({ where: { id: { in: chargeZoneIds }, organizationId: user.organizationId }, select: { id: true, name: true } })
+      : [];
+    const zoneNameMap = new Map(chargeZones.map((z) => [z.id, z.name]));
+
     return ok({
       summary: {
         total: counts.total,
@@ -196,8 +247,15 @@ export async function GET(req: Request) {
         roadTimeExcluded: road.excluded,
       },
       itemsTotal: counts.total,
+      metricsTruncated,
+      ratings,
       driverBreakdown,
       failureReasons,
+      charges: {
+        totalChargesBdt: charges.totalChargesBdt,
+        deliveredChargesBdt: charges.deliveredChargesBdt,
+        byZone: charges.byZone.map((r) => ({ ...r, zoneName: r.zoneId ? (zoneNameMap.get(r.zoneId) ?? "Deleted zone") : "No zone" })),
+      },
       daily,
       items: items.map((d) => {
         const a = d.assignments[d.assignments.length - 1];
@@ -215,6 +273,8 @@ export async function GET(req: Request) {
           failureReason: d.failureReason,
           driverName: a?.driver.name ?? null,
           vehicleRegistration: a?.vehicle?.registrationNumber ?? null,
+          zoneName: d.zone?.name ?? null,
+          deliveryFeeBdt: d.deliveryFeeBdt,
         };
       }),
     });

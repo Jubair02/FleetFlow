@@ -117,6 +117,7 @@ export function UsersView() {
               <SelectContent>
                 <SelectItem value="all">All roles</SelectItem>
                 <SelectItem value="ADMIN">Admins</SelectItem>
+                <SelectItem value="DISPATCHER">Dispatchers</SelectItem>
                 <SelectItem value="DRIVER">Drivers</SelectItem>
               </SelectContent>
             </Select>

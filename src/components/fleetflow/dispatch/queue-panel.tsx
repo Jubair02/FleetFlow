@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { CheckCircle2, FileUp, MapPin, Plus, Search, SearchX, UserCheck, Users, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { failureReasonLabel } from "@/lib/constants";
@@ -175,6 +175,7 @@ function NoMatches({ onClear }: { onClear: () => void }) {
 
 export function QueuePanel({
   queue,
+  total,
   nowMs,
   selected,
   onToggle,
@@ -182,6 +183,8 @@ export function QueuePanel({
   onAssign,
 }: {
   queue: Delivery[];
+  /** Deliveries waiting in total (the board loads the most urgent ones only). */
+  total?: number;
   nowMs: number;
   selected: Set<string>;
   onToggle: (id: string, checked: boolean) => void;
@@ -193,7 +196,7 @@ export function QueuePanel({
   const [sort, setSort] = useState<Sort>("priority");
   const [grouped, setGrouped] = useState(false);
 
-  const attention = (d: Delivery) => d.status === "FAILED" || isPastDue(d, nowMs);
+  const attention = useCallback((d: Delivery) => d.status === "FAILED" || isPastDue(d, nowMs), [nowMs]);
 
   const searched = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -240,7 +243,7 @@ export function QueuePanel({
       { key: "attention", title: "Needs attention", items: needs },
       { key: "waiting", title: "Waiting", items: waiting },
     ].filter((s) => s.items.length > 0);
-  }, [visible, grouped, nowMs]);
+  }, [visible, grouped, attention]);
 
   const visibleIds = visible.map((d) => d.id);
   const selectedVisible = visibleIds.filter((id) => selected.has(id)).length;
@@ -259,6 +262,11 @@ export function QueuePanel({
 
   return (
     <div className="space-y-4">
+      {total !== undefined && total > queue.length && (
+        <p className="rounded-xl border border-border/70 bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
+          Showing the {queue.length} most urgent of {total} waiting deliveries. Assign these first, or find a specific one in Deliveries.
+        </p>
+      )}
       {/* Toolbar */}
       <div className="space-y-3">
         <div className="flex flex-col gap-2 sm:flex-row sm:items-center">

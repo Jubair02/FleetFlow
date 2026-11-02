@@ -27,6 +27,8 @@ import { initials, timeAgo } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import { createStaffSchema } from "@/lib/validation";
 import type { StaffItem, StaffList, TempPasswordResult } from "@/lib/types-org";
+import { ROLE_LABELS, STAFF_ROLES, type StaffRole } from "@/lib/roles";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { goToSettings, useAppStore } from "@/store/app-store";
 import { FieldError, IconChip, LoadError, PANEL, ServerError, WithIcon, errorProps, issuesByField } from "./shared";
 
@@ -34,6 +36,11 @@ const DEACTIVATE_ACTION_CLASSES =
   "bg-rose-600 text-white hover:bg-rose-700 focus-visible:ring-rose-500/30 dark:bg-rose-600 dark:hover:bg-rose-700";
 
 type StaffField = "name" | "email";
+
+const ROLE_HINTS: Record<StaffRole, string> = {
+  DISPATCHER: "Deliveries, dispatch, drivers, vehicles, reports and cash",
+  ADMIN: "Everything, plus settings, team, billing and audit log",
+};
 
 function AddStaffDialog({
   open,
@@ -44,7 +51,7 @@ function AddStaffDialog({
   onOpenChange: (open: boolean) => void;
   onCreated: (result: { name: string; email: string; password: string }) => void;
 }) {
-  const [form, setForm] = useState({ name: "", email: "" });
+  const [form, setForm] = useState<{ name: string; email: string; role: StaffRole }>({ name: "", email: "", role: "DISPATCHER" });
   const [errors, setErrors] = useState<Partial<Record<StaffField, string>>>({});
   const [serverError, setServerError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -66,8 +73,8 @@ function AddStaffDialog({
     setErrors({});
     setSubmitting(true);
     try {
-      const res = await api.post<TempPasswordResult>("/api/staff", { name: parsed.data.name, email: parsed.data.email });
-      toast.success(`Dispatcher account created for ${parsed.data.name}`);
+      const res = await api.post<TempPasswordResult>("/api/staff", { name: parsed.data.name, email: parsed.data.email, role: parsed.data.role });
+      toast.success(`${ROLE_LABELS[parsed.data.role]} account created for ${parsed.data.name}`);
       useAppStore.getState().bump();
       onCreated({ name: parsed.data.name, email: parsed.data.email, password: res.temporaryPassword });
     } catch (err) {
@@ -83,13 +90,32 @@ function AddStaffDialog({
         <DialogHeader>
           <div className="mb-1 flex items-center gap-3">
             <IconChip icon={UserPlus} />
-            <DialogTitle>Add a dispatcher</DialogTitle>
+            <DialogTitle>Add a team member</DialogTitle>
           </div>
-          <DialogDescription>
-            They get full admin access to dispatch, drivers and settings. We&apos;ll generate a temporary password for you to share.
-          </DialogDescription>
+          <DialogDescription>We&apos;ll generate a temporary password for you to share. They choose their own at first sign-in.</DialogDescription>
         </DialogHeader>
         <form onSubmit={submit} className="space-y-4" noValidate>
+          <fieldset className="space-y-1.5">
+            <legend className="mb-1.5 text-sm font-medium">Role</legend>
+            <div role="radiogroup" aria-label="Role" className="grid grid-cols-2 gap-2">
+              {STAFF_ROLES.map((r) => (
+                <button
+                  key={r}
+                  type="button"
+                  role="radio"
+                  aria-checked={form.role === r}
+                  onClick={() => setForm((f) => ({ ...f, role: r }))}
+                  className={cn(
+                    "rounded-xl border px-3 py-2.5 text-left transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring",
+                    form.role === r ? "border-primary bg-primary/5 ring-1 ring-primary" : "hover:bg-muted/50",
+                  )}
+                >
+                  <span className="block text-sm font-semibold">{ROLE_LABELS[r]}</span>
+                  <span className="mt-0.5 block text-xs text-muted-foreground">{ROLE_HINTS[r]}</span>
+                </button>
+              ))}
+            </div>
+          </fieldset>
           <div className="space-y-1.5">
             <Label htmlFor="staff-name">Full name</Label>
             <WithIcon icon={UserCheck}>
@@ -128,7 +154,7 @@ function AddStaffDialog({
               Cancel
             </Button>
             <Button type="submit" disabled={submitting} className="min-h-11 sm:min-h-9">
-              {submitting ? "Adding…" : "Add dispatcher"}
+              {submitting ? "Adding…" : `Add ${ROLE_LABELS[form.role].toLowerCase()}`}
             </Button>
           </DialogFooter>
         </form>
@@ -147,7 +173,7 @@ function SeatMeter({ data }: { data: StaffList }) {
   return (
     <div className="min-w-0 flex-1 sm:max-w-xs">
       <div className="flex items-baseline justify-between gap-3 text-xs">
-        <span className="font-medium text-muted-foreground">Admin seats</span>
+        <span className="font-medium text-muted-foreground">Team seats</span>
         <span className={cn("tabular-nums", full ? "font-semibold text-amber-600 dark:text-amber-400" : "text-foreground")}>
           {limit === null ? (
             <>
@@ -163,7 +189,7 @@ function SeatMeter({ data }: { data: StaffList }) {
       <div
         className="mt-1.5 h-1.5 w-full overflow-hidden rounded-full bg-muted"
         role="meter"
-        aria-label="Admin seats used"
+        aria-label="Team seats used"
         aria-valuemin={0}
         aria-valuemax={limit ?? activeCount}
         aria-valuenow={activeCount}
@@ -189,13 +215,17 @@ function MemberRow({
   onReset,
   onDeactivate,
   onActivate,
+  onRoleChange,
 }: {
   m: StaffItem;
   busy: boolean;
   onReset: () => void;
   onDeactivate: () => void;
   onActivate: () => void;
+  onRoleChange: (role: StaffRole) => void;
 }) {
+  // The owner's account and your own can't be changed from here.
+  const locked = m.isYou || m.isOwner;
   return (
     <li className={cn("group/row flex flex-col gap-3 px-5 py-4 transition-colors hover:bg-muted/40 sm:flex-row sm:items-center sm:px-6", !m.active && "bg-muted/20")}>
       <div className="flex min-w-0 flex-1 items-center gap-3">
@@ -219,6 +249,31 @@ function MemberRow({
         <div className={cn("min-w-0", !m.active && "opacity-70")}>
           <div className="flex flex-wrap items-center gap-1.5">
             <span className="truncate text-sm font-semibold">{m.name}</span>
+            {locked || !m.active ? (
+              <Badge
+                variant="outline"
+                className={cn(
+                  m.isOwner || m.role === "ADMIN"
+                    ? "border-violet-200 bg-violet-50 text-violet-700 dark:border-violet-900 dark:bg-violet-950/40 dark:text-violet-300"
+                    : "border-sky-200 bg-sky-50 text-sky-700 dark:border-sky-900 dark:bg-sky-950/40 dark:text-sky-300",
+                )}
+              >
+                {m.isOwner ? "Owner" : ROLE_LABELS[m.role]}
+              </Badge>
+            ) : (
+              <Select value={m.role} onValueChange={(v) => v !== m.role && onRoleChange(v as StaffRole)} disabled={busy}>
+                <SelectTrigger size="sm" className="h-6 gap-1 rounded-full px-2 text-xs font-medium" aria-label={`Role for ${m.name}`}>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {STAFF_ROLES.map((r) => (
+                    <SelectItem key={r} value={r}>
+                      {ROLE_LABELS[r]}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            )}
             {m.isYou && (
               <Badge variant="outline" className="border-primary/20 bg-primary/10 text-primary">
                 You
@@ -248,6 +303,10 @@ function MemberRow({
         {m.isYou ? (
           <span className="col-span-2 inline-flex items-center gap-1.5 pl-[3.25rem] text-xs text-muted-foreground sm:pl-0">
             <ShieldCheck className="size-3.5 text-emerald-600 dark:text-emerald-400" aria-hidden="true" /> Signed in now
+          </span>
+        ) : m.isOwner ? (
+          <span className="col-span-2 inline-flex items-center gap-1.5 pl-[3.25rem] text-xs text-muted-foreground sm:pl-0">
+            <ShieldCheck className="size-3.5 text-violet-600 dark:text-violet-400" aria-hidden="true" /> Company owner
           </span>
         ) : m.active ? (
           <>
@@ -297,6 +356,19 @@ export function TeamTab({
   const atLimit = data ? data.limit !== null && data.activeCount >= data.limit : false;
   const inactive = items.filter((m) => !m.active).length;
 
+  const changeRole = async (member: StaffItem, role: StaffRole) => {
+    setBusyId(member.id);
+    try {
+      await api.patch(`/api/staff/${member.id}`, { action: "set-role", role });
+      toast.success(`${member.name} is now ${role === "ADMIN" ? "an admin" : "a dispatcher"} — they'll sign in again`);
+      useAppStore.getState().bump();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to change the role");
+    } finally {
+      setBusyId(null);
+    }
+  };
+
   const run = async (member: StaffItem, action: "activate" | "deactivate" | "reset-password") => {
     setBusyId(member.id);
     try {
@@ -340,17 +412,17 @@ export function TeamTab({
                 setAddOpen(true);
               }}
               disabled={!data || atLimit}
-              title={atLimit ? "Your plan's dispatcher limit is reached — upgrade to add more" : undefined}
+              title={atLimit ? "Your plan's team limit is reached — upgrade to add more" : undefined}
               className="min-h-11 shrink-0 sm:min-h-9"
             >
-              <UserPlus aria-hidden /> Add dispatcher
+              <UserPlus aria-hidden /> Add team member
             </Button>
           </div>
         </header>
 
         {atLimit && (
           <div className="flex flex-col gap-2 border-b bg-amber-50/70 px-5 py-3 text-xs text-amber-800 sm:flex-row sm:items-center sm:justify-between sm:px-6 dark:bg-amber-950/30 dark:text-amber-300">
-            <p>You&apos;ve reached your plan&apos;s dispatcher limit. Deactivate someone or upgrade your plan to add more.</p>
+            <p>You&apos;ve reached your plan&apos;s team limit. Deactivate someone or upgrade your plan to add more.</p>
             <Button
               type="button"
               variant="link"
@@ -385,7 +457,7 @@ export function TeamTab({
               <Users className="size-6 text-muted-foreground" aria-hidden />
             </span>
             <p className="text-sm font-medium">No team members yet</p>
-            <p className="text-xs text-muted-foreground">Add a dispatcher to share the workload.</p>
+            <p className="text-xs text-muted-foreground">Add a dispatcher or admin to share the workload.</p>
           </div>
         ) : (
           <ul className="divide-y" aria-label="Team members">
@@ -397,6 +469,7 @@ export function TeamTab({
                 onReset={() => setPending({ member: m, action: "reset-password" })}
                 onDeactivate={() => setPending({ member: m, action: "deactivate" })}
                 onActivate={() => void run(m, "activate")}
+                onRoleChange={(role) => void changeRole(m, role)}
               />
             ))}
           </ul>

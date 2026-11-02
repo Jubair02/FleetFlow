@@ -348,7 +348,7 @@ export function VehiclesView() {
   const [deleting, setDeleting] = useState<VehicleItem | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
 
-  const vehicles = data?.items ?? [];
+  const vehicles = useMemo(() => data?.items ?? [], [data]);
 
   const counts = useMemo(() => {
     const c = { ACTIVE: 0, MAINTENANCE: 0, INACTIVE: 0 };

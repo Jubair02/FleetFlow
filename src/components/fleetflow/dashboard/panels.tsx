@@ -4,6 +4,7 @@ import type { ReactNode } from "react";
 import {
   AlertTriangle,
   ArrowRight,
+  CalendarClock,
   CheckCircle2,
   Clock,
   Flame,
@@ -78,6 +79,11 @@ const ATTENTION_META: Record<AttentionKind, { icon: LucideIcon; label: (n: numbe
   overdue: { icon: Clock, label: (n) => (n === 1 ? "Overdue delivery" : "Overdue deliveries"), tone: "rose" },
   failed: { icon: AlertTriangle, label: () => "Failed — waiting for re-dispatch", tone: "rose" },
   urgent: { icon: Flame, label: () => "Urgent or high priority, no driver yet", tone: "amber" },
+  reschedule: {
+    icon: CalendarClock,
+    label: (n) => (n === 1 ? "Reschedule request waiting — customer asked for another day" : "Reschedule requests waiting — customers asked for another day"),
+    tone: "amber",
+  },
   vehicles: { icon: Wrench, label: (n) => (n === 1 ? "Vehicle off the road" : "Vehicles off the road"), tone: "amber" },
 };
 

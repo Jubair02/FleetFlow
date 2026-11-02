@@ -14,12 +14,14 @@ import {
   PackageCheck,
   Phone,
   RefreshCw,
+  Route,
   Sparkles,
   Truck,
   type LucideIcon,
+  Banknote,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { friendlyDueDate } from "@/lib/format";
+import { friendlyDueDate, formatBdt, formatTime } from "@/lib/format";
 import type { MyJob } from "@/lib/types";
 import { VehicleTypeLabel } from "@/components/fleetflow/badges";
 import { Button } from "@/components/ui/button";
@@ -68,6 +70,40 @@ function PrimaryActionButton({ job, h, className }: { job: MyJob; h: JobHandlers
       {busy && action.needsIdle ? <Loader2 className="size-5 animate-spin" aria-hidden="true" /> : <Icon className="size-5" aria-hidden="true" />}
       {action.label}
     </Button>
+  );
+}
+
+/** Cash the driver must collect on this job (cash on delivery). */
+function CodCallout({ job, className }: { job: MyJob; className?: string }) {
+  if (!job.codAmount || job.codCollectedAt) return null;
+  return (
+    <div className={cn("flex items-center gap-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-amber-900 dark:border-amber-900/60 dark:bg-amber-950/40 dark:text-amber-200", className)}>
+      <Banknote className="size-5 shrink-0" aria-hidden="true" />
+      <p className="text-sm">
+        Collect <strong className="text-base tabular-nums">{formatBdt(job.codAmount)}</strong> in cash on delivery
+      </p>
+    </div>
+  );
+}
+
+/** "Stop 3 · ETA 2:20 PM" once dispatch has planned the driver's route (estimate). */
+function RouteLine({ job, className }: { job: MyJob; className?: string }) {
+  if (!job.routeSeq) return null;
+  return (
+    <span className={cn("inline-flex items-center gap-1.5 text-muted-foreground", className)}>
+      <Route className="size-4 shrink-0" aria-hidden="true" />
+      <span className="tabular-nums">
+        <span className="font-medium text-foreground">Stop {job.routeSeq}</span>
+        {job.plannedEta ? (
+          <>
+            {" · "}
+            <span className="sr-only">estimated arrival </span>
+            <span aria-hidden="true">ETA </span>
+            {formatTime(job.plannedEta)}
+          </>
+        ) : null}
+      </span>
+    </span>
   );
 }
 
@@ -131,6 +167,7 @@ export function NextStopCard({ job, h }: { job: MyJob; h: JobHandlers }) {
             <span className={cn("min-w-0 break-words", toPickup ? "text-foreground" : "text-muted-foreground")}>{job.pickupAddress}</span>
           </span>
           <span className="flex flex-wrap items-center gap-x-4 gap-y-1.5">
+            <RouteLine job={job} />
             <DueLine job={job} />
             {registration ? (
               <span className="inline-flex items-center gap-1.5 text-muted-foreground">
@@ -151,6 +188,7 @@ export function NextStopCard({ job, h }: { job: MyJob; h: JobHandlers }) {
         </span>
       </button>
 
+      <CodCallout job={job} className="mx-5 mb-3 sm:mx-6" />
       {job.instructions ? <InstructionsCallout text={job.instructions} className="mx-5 sm:mx-6" /> : null}
 
       <div className="flex flex-col gap-2 p-5 pt-4 sm:p-6 sm:pt-4">
@@ -215,7 +253,11 @@ export function JobCard({ job, h, index = 0 }: { job: MyJob; h: JobHandlers; ind
         <span className="mt-2 line-clamp-2 block text-[15px] font-medium leading-snug break-words">{job.deliveryAddress}</span>
         <span className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm">
           <span className="max-w-full truncate text-muted-foreground">{job.recipientName}</span>
+          <RouteLine job={job} />
           <DueLine job={job} />
+          {job.codAmount && !job.codCollectedAt ? (
+            <span className="font-semibold text-amber-700 tabular-nums dark:text-amber-300">Collect {formatBdt(job.codAmount)}</span>
+          ) : null}
         </span>
       </button>
       <div className="flex items-center gap-2 px-4 pb-4">

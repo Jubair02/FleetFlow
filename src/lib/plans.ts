@@ -2,6 +2,7 @@ import type { Plan, Prisma } from "@prisma/client";
 import { ApiError } from "@/lib/api-helpers";
 import { table } from "@/lib/delivery";
 import { DEFAULT_TIMEZONE, startOfMonthInTz } from "@/lib/timezone";
+import { readOnlyMessage, subscriptionAccess, type SubscriptionFields } from "@/lib/subscription";
 import {
   FEATURES,
   FEATURE_KEYS,
@@ -79,23 +80,58 @@ export async function getUsage(db: Db, organizationId: string, timezone = DEFAUL
   const [drivers, vehicles, admins, monthlyDeliveries] = await Promise.all([
     db.user.count({ where: { organizationId, role: "DRIVER", active: true } }),
     db.vehicle.count({ where: { organizationId, status: { not: "INACTIVE" } } }),
-    db.user.count({ where: { organizationId, role: "ADMIN", active: true } }),
+    db.user.count({ where: { organizationId, role: { in: ["ADMIN", "DISPATCHER"] }, active: true } }),
     db.delivery.count({ where: { organizationId, createdAt: { gte: monthStart } } }),
   ]);
   return { drivers, vehicles, admins, monthlyDeliveries };
 }
 
+type LockedOrg = { timezone: string } & SubscriptionFields;
+
+/** Lock the organization row (FOR UPDATE) and read what growth checks need. */
+async function lockOrgForGrowth(tx: Db, organizationId: string): Promise<LockedOrg> {
+  const rows = await tx.$queryRaw<LockedOrg[]>`
+    SELECT timezone, "subscriptionStatus", "trialEndsAt", "paidUntil"
+    FROM ${table("Organization")} WHERE id = ${organizationId} FOR UPDATE`;
+  if (!rows[0]) throw new ApiError(404, "Organization not found");
+  return rows[0];
+}
+
+function assertNotReadOnly(org: SubscriptionFields) {
+  const access = subscriptionAccess(org);
+  if (access.state === "READ_ONLY") throw new ApiError(402, readOnlyMessage(access));
+}
+
 /**
- * Throw 403 if adding `adding` units of `resource` would exceed the plan.
- * Call inside the write transaction: it locks the organization row so two
- * concurrent creates can't both slip under the limit. Existing data over a
- * limit is never touched — only new additions are refused.
+ * Throw 402 if the company is read-only (trial or subscription ended past the
+ * grace period — see src/lib/subscription.ts) — call before any action that
+ * adds work without a plan limit, such as assigning a delivery.
  */
-export async function assertPlanLimit(tx: Db, organizationId: string, resource: PlanResource, adding = 1): Promise<void> {
-  const rows = await tx.$queryRaw<{ timezone: string }[]>`
-    SELECT timezone FROM ${table("Organization")} WHERE id = ${organizationId} FOR UPDATE`;
-  const org = rows[0];
+export async function assertCanGrow(db: Db, organizationId: string): Promise<void> {
+  const org = await db.organization.findUnique({
+    where: { id: organizationId },
+    select: { subscriptionStatus: true, trialEndsAt: true, paidUntil: true },
+  });
   if (!org) throw new ApiError(404, "Organization not found");
+  assertNotReadOnly(org);
+}
+
+/**
+ * Throw 403 if adding `adding` units of `resource` would exceed the plan, or
+ * 402 if the company is read-only (pass enforceSubscription: false for
+ * platform-admin actions). Call inside the write transaction: it locks the
+ * organization row so two concurrent creates can't both slip under the limit.
+ * Existing data over a limit is never touched — only new additions are refused.
+ */
+export async function assertPlanLimit(
+  tx: Db,
+  organizationId: string,
+  resource: PlanResource,
+  adding = 1,
+  opts: { enforceSubscription?: boolean } = {}
+): Promise<void> {
+  const org = await lockOrgForGrowth(tx, organizationId);
+  if (opts.enforceSubscription !== false) assertNotReadOnly(org);
   const plan = await getOrgPlan(tx, organizationId);
   const limit = plan.limits[resource];
   if (limit === null) return;
@@ -136,14 +172,53 @@ export interface LimitImpact {
  */
 export async function previewLimitImpact(db: Db, planCode: string, limits: Record<PlanResource, number | null>): Promise<LimitImpact[]> {
   const orgs = await db.organization.findMany({ where: { plan: planCode }, select: { id: true, name: true, timezone: true } });
+  const usage = await getUsageForMany(db, orgs);
   const impacts: LimitImpact[] = [];
   for (const o of orgs) {
-    const usage = await getUsage(db, o.id, o.timezone);
+    const u = usage.get(o.id)!;
     const over = PLAN_RESOURCES.flatMap((r) => {
       const limit = limits[r];
-      return limit !== null && usage[r] > limit ? [{ resource: r, usage: usage[r], limit }] : [];
+      return limit !== null && u[r] > limit ? [{ resource: r, usage: u[r], limit }] : [];
     });
     if (over.length) impacts.push({ organizationId: o.id, organizationName: o.name, over });
   }
   return impacts;
+}
+
+/**
+ * getUsage for many organizations with a fixed number of grouped queries
+ * (one delivery query per distinct timezone) instead of four per organization.
+ */
+export async function getUsageForMany(
+  db: Db,
+  orgs: { id: string; timezone: string }[]
+): Promise<Map<string, Record<PlanResource, number>>> {
+  const result = new Map(orgs.map((o) => [o.id, { drivers: 0, vehicles: 0, admins: 0, monthlyDeliveries: 0 }]));
+  if (orgs.length === 0) return result;
+  const ids = orgs.map((o) => o.id);
+  const byTz = new Map<string, string[]>();
+  for (const o of orgs) byTz.set(o.timezone, [...(byTz.get(o.timezone) ?? []), o.id]);
+  const now = new Date();
+
+  const [users, vehicles, deliveries] = await Promise.all([
+    db.user.groupBy({ by: ["organizationId", "role"], where: { organizationId: { in: ids }, active: true }, _count: { _all: true } }),
+    db.vehicle.groupBy({ by: ["organizationId"], where: { organizationId: { in: ids }, status: { not: "INACTIVE" } }, _count: { _all: true } }),
+    Promise.all(
+      [...byTz].map(([tz, tzIds]) =>
+        db.delivery.groupBy({
+          by: ["organizationId"],
+          where: { organizationId: { in: tzIds }, createdAt: { gte: startOfMonthInTz(now, tz) } },
+          _count: { _all: true },
+        })
+      )
+    ),
+  ]);
+  for (const u of users) {
+    const row = result.get(u.organizationId)!;
+    if (u.role === "DRIVER") row.drivers += u._count._all;
+    else if (u.role === "ADMIN" || u.role === "DISPATCHER") row.admins += u._count._all;
+  }
+  for (const v of vehicles) result.get(v.organizationId)!.vehicles = v._count._all;
+  for (const d of deliveries.flat()) result.get(d.organizationId)!.monthlyDeliveries = d._count._all;
+  return result;
 }

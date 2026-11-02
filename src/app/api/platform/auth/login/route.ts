@@ -3,7 +3,8 @@ import { clientIp } from "@/lib/account";
 import { authenticate } from "@/lib/login-service";
 import { parseBody, platformLoginSchema, toAdminInfo } from "@/lib/platform-service";
 
-// POST /api/platform/auth/login {email, password} → { admin }
+// POST /api/platform/auth/login {email, password} → { admin, mfa: "enroll" | "verify" }
+// The session is pending until /api/platform/auth/mfa/verify accepts a code.
 // Kept for API clients; the app uses the shared /api/auth/login. Same
 // implementation, restricted to staff accounts (company credentials → 401).
 export async function POST(req: Request) {
@@ -11,7 +12,7 @@ export async function POST(req: Request) {
     const { email, password } = parseBody(platformLoginSchema, await readJson<unknown>(req));
     const result = await authenticate(email, password, clientIp(req), { scope: "platform" });
     if (result.kind !== "platform") throw new Error("unreachable: platform scope returned a tenant login");
-    return ok({ admin: toAdminInfo(result.admin) });
+    return ok({ admin: toAdminInfo(result.admin), mfa: result.mfa });
   } catch (e) {
     return fail(e);
   }

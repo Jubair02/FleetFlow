@@ -1,10 +1,13 @@
 import type { Prisma } from "@prisma/client";
 import { db } from "@/lib/db";
 import { ApiError, fail, ok, readJson, requireUser } from "@/lib/api-helpers";
+import { isStaffRole } from "@/lib/roles";
 import { statusChangeSchema, firstError } from "@/lib/validation";
 import { failureReasonLabel, isValidAdminTransition, isValidDriverTransition, type DeliveryStatus } from "@/lib/constants";
-import { TX_OPTIONS, closeAssignment, lockDelivery, type AssignmentOutcome } from "@/lib/delivery";
+import { TX_OPTIONS, closeAssignment, lockDelivery, type AssignmentOutcome, codCompletionData, codReopenData } from "@/lib/delivery";
 import { auditData, bestEffort, notifyAdmins, notifyInApp, sendCustomerOutcomeEmail } from "@/lib/notify";
+import { dispatchWebhooksSoon, queueDeliveryStatusChange } from "@/lib/webhooks";
+import { clearLocationIfIdle } from "@/lib/live-location";
 
 type Params = { params: Promise<{ id: string }> };
 
@@ -39,7 +42,7 @@ export async function POST(req: Request, { params }: Params) {
 
     const parsed = statusChangeSchema.safeParse(await readJson<unknown>(req));
     if (!parsed.success) throw new ApiError(400, firstError(parsed.error));
-    const { status: to, note, failureReason } = parsed.data;
+    const { status: to, note, failureReason, codCollectedAmount } = parsed.data;
     if (to === "ASSIGNED") {
       throw new ApiError(400, "Use the Assign action to dispatch a driver — status cannot be set to ASSIGNED directly");
     }
@@ -54,7 +57,7 @@ export async function POST(req: Request, { params }: Params) {
       if (from === to) throw new ApiError(409, `Delivery is already ${label(from)}`);
 
       const active = delivery.assignments[0] ?? null;
-      const isAdmin = user.role === "ADMIN";
+      const isAdmin = isStaffRole(user.role);
       let isOverride = false;
 
       if (!isAdmin) {
@@ -105,9 +108,15 @@ export async function POST(req: Request, { params }: Params) {
 
       // ── apply ──
       const now = new Date();
-      const data: Prisma.DeliveryUpdateInput = { status: to };
-      if (to === "DELIVERED") data.completedAt = now;
-      else if (from === "DELIVERED") data.completedAt = null; // override away from delivered
+      let data: Prisma.DeliveryUncheckedUpdateInput = { status: to };
+      if (to === "DELIVERED") {
+        data.completedAt = now;
+        // COD: the cash is with the driver who held the job (admin overrides included).
+        data = { ...data, ...codCompletionData(delivery, codCollectedAmount, active?.driverId ?? null, now) };
+      } else if (from === "DELIVERED") {
+        data.completedAt = null; // override away from delivered
+        data = { ...data, ...codReopenData(delivery) };
+      }
       data.failureReason = to === "FAILED" ? failureReason || "OTHER" : null;
 
       await tx.delivery.update({ where: { id: delivery.id }, data });
@@ -158,6 +167,8 @@ export async function POST(req: Request, { params }: Params) {
         }),
       });
 
+      await queueDeliveryStatusChange(tx, user.organizationId, delivery.id, from, to);
+
       return { delivery, from, toStatus: to, closedDriver: outcome && active ? active.driver : null };
     }, TX_OPTIONS);
 
@@ -179,7 +190,7 @@ export async function POST(req: Request, { params }: Params) {
     };
 
     // an admin action took the job off a driver's list — tell them
-    if (user.role === "ADMIN" && closedDriver) {
+    if (isStaffRole(user.role) && closedDriver) {
       const driverMsgs: Record<string, [string, string, string]> = {
         CANCELLED: ["UNASSIGNED", "Delivery cancelled", `${delivery.trackingCode} was cancelled by dispatch.`],
         CREATED: ["UNASSIGNED", "Assignment removed", `${delivery.trackingCode} was returned to the pending queue by dispatch.`],
@@ -225,6 +236,10 @@ export async function POST(req: Request, { params }: Params) {
       );
     }
 
+    // the job left the driver's hands — drop their live position if nothing else is in progress
+    if (closedDriver) await bestEffort("status: clear live location", () => clearLocationIfIdle(closedDriver.id));
+
+    dispatchWebhooksSoon(user.organizationId);
     return ok({ success: true, from, to: toStatus });
   } catch (e) {
     return fail(e);

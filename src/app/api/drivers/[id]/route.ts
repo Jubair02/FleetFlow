@@ -1,6 +1,6 @@
 import { db } from "@/lib/db";
 import { assertPlanLimit } from "@/lib/plans";
-import { ApiError, fail, ok, readJson, requireAdmin } from "@/lib/api-helpers";
+import { ApiError, fail, ok, readJson, requireStaff } from "@/lib/api-helpers";
 import { updateDriverSchema, firstError } from "@/lib/validation";
 import { lockDriver, syncDriverAvailability, TX_OPTIONS } from "@/lib/delivery";
 import { auditData } from "@/lib/notify";
@@ -10,7 +10,7 @@ type Params = { params: Promise<{ id: string }> };
 // PATCH /api/drivers/[id] — update profile / availability / activate / deactivate (admin)
 export async function PATCH(req: Request, { params }: Params) {
   try {
-    const user = await requireAdmin();
+    const user = await requireStaff();
     const { id } = await params;
 
     const parsed = updateDriverSchema.safeParse(await readJson<unknown>(req));

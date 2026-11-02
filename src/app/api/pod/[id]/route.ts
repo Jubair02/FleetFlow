@@ -1,5 +1,6 @@
 import { db } from "@/lib/db";
 import { ApiError, fail, requireUser } from "@/lib/api-helpers";
+import { isStaffRole } from "@/lib/roles";
 import { driverCanReadDelivery } from "@/lib/constants";
 import { readPodFile } from "@/lib/storage";
 
@@ -26,7 +27,7 @@ export async function GET(_req: Request, { params }: Params) {
     if (!pod || pod.delivery.organizationId !== user.organizationId) {
       throw new ApiError(404, "Not found");
     }
-    if (user.role !== "ADMIN" && !driverCanReadDelivery(pod.delivery.assignments, user.id)) {
+    if (!isStaffRole(user.role) && !driverCanReadDelivery(pod.delivery.assignments, user.id)) {
       throw new ApiError(403, "You are not assigned to this delivery");
     }
 

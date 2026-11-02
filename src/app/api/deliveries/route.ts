@@ -1,27 +1,16 @@
 import { db } from "@/lib/db";
-import { assertPlanLimit } from "@/lib/plans";
-import { ApiError, fail, ok, parseDateParam, readJson, requireAdmin } from "@/lib/api-helpers";
-import { createDeliverySchema, firstError } from "@/lib/validation";
-import { generateTrackingCode, generateTrackingToken, TX_OPTIONS } from "@/lib/delivery";
-import { auditData, bestEffort, sendCustomerTrackingEmail } from "@/lib/notify";
-import { toDeliveryDTO } from "@/lib/serializers";
-import { Prisma } from "@prisma/client";
-
-const MAX_CREATE_ATTEMPTS = 5;
-
-/** True when a unique-constraint error was caused by a tracking code/token collision. */
-function isTrackingCollision(e: unknown): boolean {
-  if (!(e instanceof Prisma.PrismaClientKnownRequestError) || e.code !== "P2002") return false;
-  const target = e.meta?.target;
-  const fields = Array.isArray(target) ? target.join(",") : String(target ?? "");
-  return /trackingCode|trackingToken/i.test(fields);
-}
+import { ApiError, fail, ok, parseDateParam, readJson, requireStaff } from "@/lib/api-helpers";
+import { createStaffDeliverySchema, firstError } from "@/lib/validation";
+import { createDelivery } from "@/lib/delivery-service";
+import { parseDeliveryPoint } from "@/lib/geocoding";
+import { DELIVERY_ZONE_INCLUDE, toDeliveryDTO } from "@/lib/serializers";
+import type { Prisma } from "@prisma/client";
 
 // GET /api/deliveries — org-scoped list with search/filters/pagination (admin)
 // Date filters: `from` inclusive, `to` exclusive (ISO instants, see src/lib/types.ts).
 export async function GET(req: Request) {
   try {
-    const user = await requireAdmin();
+    const user = await requireStaff();
     const url = new URL(req.url);
     const q = (key: string) => url.searchParams.get(key)?.trim() || "";
 
@@ -46,6 +35,9 @@ export async function GET(req: Request) {
       ];
     }
     if (statuses.length) where.status = { in: statuses.slice(0, 20) };
+    // Customer reschedule requests from the tracking page (?reschedule=PENDING).
+    const reschedule = q("reschedule").toUpperCase();
+    if (reschedule === "PENDING" || reschedule === "ACCEPTED" || reschedule === "DECLINED") where.rescheduleStatus = reschedule;
     if (priority) where.priority = priority;
     // Both filters must match the same assignment.
     const importBatchId = q("importBatchId");
@@ -65,7 +57,7 @@ export async function GET(req: Request) {
       };
     }
 
-    const [total, items] = await Promise.all([
+    const [total, items, pendingReschedules] = await Promise.all([
       db.delivery.count({ where }),
       db.delivery.findMany({
         where,
@@ -75,8 +67,10 @@ export async function GET(req: Request) {
         include: {
           assignments: { where: { active: true }, include: { driver: true, vehicle: true } },
           _count: { select: { pods: true } },
+          ...DELIVERY_ZONE_INCLUDE,
         },
       }),
+      db.delivery.count({ where: { organizationId: user.organizationId, rescheduleStatus: "PENDING" } }),
     ]);
 
     return ok({
@@ -85,91 +79,32 @@ export async function GET(req: Request) {
       page,
       pageSize,
       pageCount: Math.max(1, Math.ceil(total / pageSize)),
+      pendingReschedules,
     });
   } catch (e) {
     return fail(e);
   }
 }
 
-// POST /api/deliveries — create (admin)
+// POST /api/deliveries — create (admin). Shared with the public API: src/lib/delivery-service.ts
 export async function POST(req: Request) {
   try {
-    const user = await requireAdmin();
+    const user = await requireStaff();
     const body = await readJson<unknown>(req);
-    const parsed = createDeliverySchema.safeParse(body);
+    const parsed = createStaffDeliverySchema.safeParse(body);
     if (!parsed.success) throw new ApiError(400, firstError(parsed.error));
-    const data = parsed.data;
+    // a pin dropped on the map; without one the address is geocoded after the response
+    const pin = parseDeliveryPoint(parsed.data.deliveryLat, parsed.data.deliveryLng);
 
-    // A tracking code/token collision aborts the whole Postgres transaction,
-    // so on P2002 the entire create is retried with freshly generated values.
-    const createOnce = () =>
-      db.$transaction(async (tx) => {
-        await assertPlanLimit(tx, user.organizationId, "monthlyDeliveries");
-        const created = await tx.delivery.create({
-          data: {
-            organizationId: user.organizationId,
-            trackingCode: generateTrackingCode(),
-            trackingToken: generateTrackingToken(),
-            recipientName: data.recipientName,
-            recipientPhone: data.recipientPhone,
-            pickupAddress: data.pickupAddress,
-            deliveryAddress: data.deliveryAddress,
-            instructions: data.instructions || null,
-            externalRef: data.externalRef || null,
-            recipientEmail: data.recipientEmail || null,
-            priority: data.priority,
-            expectedAt: data.expectedAt ? new Date(data.expectedAt) : null,
-          },
-        });
-        await tx.deliveryEvent.create({
-          data: {
-            deliveryId: created.id,
-            eventType: "CREATED",
-            actorId: user.id,
-            actorName: user.name,
-            note: "Delivery created",
-            customerVisible: true,
-          },
-        });
-        await tx.auditLog.create({
-          data: auditData({
-            organizationId: user.organizationId,
-            actorId: user.id,
-            actorName: user.name,
-            action: "DELIVERY_CREATED",
-            entityType: "Delivery",
-            entityId: created.id,
-            detail: { trackingCode: created.trackingCode, recipient: data.recipientName },
-          }),
-        });
-        return created;
-      }, TX_OPTIONS);
-
-    let delivery: Awaited<ReturnType<typeof createOnce>> | null = null;
-    for (let attempt = 1; !delivery; attempt++) {
-      try {
-        delivery = await createOnce();
-      } catch (e) {
-        if (attempt < MAX_CREATE_ATTEMPTS && isTrackingCollision(e)) continue;
-        throw e;
-      }
-    }
-
-    const created = delivery;
-    await bestEffort("customer tracking email", () =>
-      sendCustomerTrackingEmail({
-        organizationId: user.organizationId,
-        deliveryId: created.id,
-        trackingCode: created.trackingCode,
-        trackingToken: created.trackingToken,
-        recipientName: created.recipientName,
-        recipientEmail: created.recipientEmail,
-      })
+    const { delivery } = await createDelivery(
+      { organizationId: user.organizationId, actorId: user.id, actorName: user.name },
+      parsed.data,
+      { point: pin ? { ...pin, source: "PIN" } : null }
     );
 
     const full = await db.delivery.findUniqueOrThrow({
       where: { id: delivery.id },
-      include: { assignments: { where: { active: true }, include: { driver: true, vehicle: true } }, _count: { select: { pods: true } } },
+      include: { assignments: { where: { active: true }, include: { driver: true, vehicle: true } }, _count: { select: { pods: true } }, ...DELIVERY_ZONE_INCLUDE },
     });
     return ok({ delivery: toDeliveryDTO(full, true) }, 201);
   } catch (e) {

@@ -13,6 +13,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Callout, errorProps, FieldError, ServerError, SUBSCRIPTION_LABELS, SUBSCRIPTION_STATUSES } from "../../shared";
 import { patchOrg } from "../org-api";
 import { OrgFormDialog, type FormControls } from "./org-form-dialog";
+import { GRACE_DAYS } from "@/lib/subscription";
 
 const NOTES_MAX = 1000;
 
@@ -39,8 +40,9 @@ function SubscriptionForm({ detail, controls }: { detail: PlatformOrgDetail; con
   const org = detail.organization;
   const [status, setStatus] = useState<SubscriptionStatus>(org.subscriptionStatus);
   const [paidUntil, setPaidUntil] = useState(org.paidUntil ? org.paidUntil.slice(0, 10) : "");
+  const [trialEnds, setTrialEnds] = useState(org.trialEndsAt ? org.trialEndsAt.slice(0, 10) : "");
   const [notes, setNotes] = useState(org.billingNotes ?? "");
-  const [errors, setErrors] = useState<{ paidUntil?: string; notes?: string }>({});
+  const [errors, setErrors] = useState<{ paidUntil?: string; trialEnds?: string; notes?: string }>({});
   const [serverError, setServerError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
@@ -48,6 +50,7 @@ function SubscriptionForm({ detail, controls }: { detail: PlatformOrgDetail; con
     e.preventDefault();
     const found: typeof errors = {};
     if (paidUntil && !/^\d{4}-\d{2}-\d{2}$/.test(paidUntil)) found.paidUntil = "Enter a valid date";
+    if (trialEnds && !/^\d{4}-\d{2}-\d{2}$/.test(trialEnds)) found.trialEnds = "Enter a valid date";
     if (notes.length > NOTES_MAX) found.notes = `Notes must be ${NOTES_MAX} characters or fewer`;
     setErrors(found);
     setServerError(null);
@@ -59,6 +62,7 @@ function SubscriptionForm({ detail, controls }: { detail: PlatformOrgDetail; con
         action: "update-subscription",
         subscriptionStatus: status,
         paidUntil: paidUntil ? new Date(`${paidUntil}T00:00:00.000Z`).toISOString() : null,
+        trialEndsAt: trialEnds ? new Date(`${trialEnds}T00:00:00.000Z`).toISOString() : null,
         billingNotes: notes.trim() ? notes.trim() : null,
       });
       toast.success("Subscription record updated");
@@ -94,6 +98,24 @@ function SubscriptionForm({ detail, controls }: { detail: PlatformOrgDetail; con
           </SelectContent>
         </Select>
       </div>
+      {status === "TRIAL" && (
+        <div className="space-y-1.5">
+          <Label htmlFor="sub-trial">Trial ends</Label>
+          <Input
+            id="sub-trial"
+            type="date"
+            className="h-11 sm:h-9"
+            value={trialEnds}
+            onChange={(e) => setTrialEnds(e.target.value)}
+            disabled={submitting}
+            {...errorProps("sub-trial", errors.trialEnds)}
+          />
+          <p className="text-xs text-muted-foreground">
+            After this date the company gets {GRACE_DAYS} days&apos; grace, then becomes read-only. Move it later to extend the trial.
+          </p>
+          <FieldError id="sub-trial-error" message={errors.trialEnds} />
+        </div>
+      )}
       <div className="space-y-1.5">
         <Label htmlFor="sub-paid">
           Paid until <span className="font-normal text-muted-foreground">(optional)</span>

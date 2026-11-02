@@ -250,3 +250,105 @@ export function roadTimeSpans(
     return { start: a?.assignedAt ?? null, end: a ? (a.completedAt ?? d.completedAt) : null };
   });
 }
+
+// ── Customer ratings (tracking page, src/lib/customer-feedback.ts) ──
+//  Average rating   mean of 1–5 star ratings given in range (1 decimal)
+//  Distribution     count per star value
+//  Per driver       mean over deliveries the driver delivered (the
+//                   assignment closed DELIVERED), with the rating count
+
+export interface RatingStats {
+  count: number;
+  /** Mean rating, 1 decimal; null with no ratings. */
+  average: number | null;
+  /** distribution[i] = number of (i + 1)-star ratings */
+  distribution: [number, number, number, number, number];
+}
+
+/** Rating summary over raw ratings. Anything that isn't a whole 1–5 is ignored. */
+export function ratingStats(ratings: readonly (number | null | undefined)[]): RatingStats {
+  const distribution: RatingStats["distribution"] = [0, 0, 0, 0, 0];
+  let sum = 0;
+  let count = 0;
+  for (const r of ratings) {
+    if (typeof r !== "number" || !Number.isInteger(r) || r < 1 || r > 5) continue;
+    distribution[r - 1]++;
+    sum += r;
+    count++;
+  }
+  return { count, average: count ? Math.round((sum / count) * 10) / 10 : null, distribution };
+}
+
+/** Per-driver average rating: rows are rated deliveries with the delivering driver (null = unknown). */
+export function driverRatings(rows: readonly { driverId: string | null; rating: number | null }[]): Map<string, { average: number | null; count: number }> {
+  const byDriver = new Map<string, number[]>();
+  for (const r of rows) {
+    if (!r.driverId || r.rating === null) continue;
+    const list = byDriver.get(r.driverId);
+    if (list) list.push(r.rating);
+    else byDriver.set(r.driverId, [r.rating]);
+  }
+  return new Map(
+    Array.from(byDriver, ([driverId, list]) => {
+      const s = ratingStats(list);
+      return [driverId, { average: s.average, count: s.count }];
+    })
+  );
+}
+
+// ── Delivery charges (docs/ZONES.md) ─────────────────────────
+//
+//  Charges          sum of deliveryFeeBdt of deliveries in scope that are
+//                   NOT cancelled (a cancelled order isn't billed);
+//                   unpriced deliveries (fee null) add 0.
+//  Delivered charges the same over DELIVERED deliveries only.
+//  Per zone         deliveries (all statuses), delivered, charges — one row
+//                   per zone (null = no zone / zone deleted), largest first.
+// Computed from a SQL groupBy (zoneId × status), so never truncated.
+
+export interface ChargeGroup {
+  zoneId: string | null;
+  status: string;
+  count: number;
+  /** Sum of deliveryFeeBdt in the group (null when every fee is null). */
+  feeSum: number | null;
+}
+
+export interface ZoneChargeRow {
+  zoneId: string | null;
+  deliveries: number;
+  delivered: number;
+  chargesBdt: number;
+  deliveredChargesBdt: number;
+}
+
+export interface ChargeSummary {
+  totalChargesBdt: number;
+  deliveredChargesBdt: number;
+  byZone: ZoneChargeRow[];
+}
+
+export function chargesByZone(groups: ChargeGroup[]): ChargeSummary {
+  const byZone = new Map<string | null, ZoneChargeRow>();
+  let totalChargesBdt = 0;
+  let deliveredChargesBdt = 0;
+  for (const g of groups) {
+    const row = byZone.get(g.zoneId) ?? { zoneId: g.zoneId, deliveries: 0, delivered: 0, chargesBdt: 0, deliveredChargesBdt: 0 };
+    const fee = g.feeSum ?? 0;
+    row.deliveries += g.count;
+    if (g.status !== "CANCELLED") {
+      row.chargesBdt += fee;
+      totalChargesBdt += fee;
+    }
+    if (g.status === "DELIVERED") {
+      row.delivered += g.count;
+      row.deliveredChargesBdt += fee;
+      deliveredChargesBdt += fee;
+    }
+    byZone.set(g.zoneId, row);
+  }
+  const rows = Array.from(byZone.values()).sort(
+    (a, b) => Number(a.zoneId === null) - Number(b.zoneId === null) || b.chargesBdt - a.chargesBdt || b.deliveries - a.deliveries
+  );
+  return { totalChargesBdt, deliveredChargesBdt, byZone: rows };
+}

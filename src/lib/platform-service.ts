@@ -110,6 +110,8 @@ export const orgActionSchema = z.discriminatedUnion("action", [
     action: z.literal("update-subscription"),
     subscriptionStatus: z.enum(SUBSCRIPTION_STATUSES, "Choose a valid subscription status"),
     paidUntil: isoDate.nullable(),
+    /** End of the free trial; omitted = unchanged. */
+    trialEndsAt: isoDate.nullable().optional(),
     billingNotes: z.string().trim().max(1000, "Billing notes must be 1000 characters or fewer").nullable(),
   }),
 ], "Unknown action");
@@ -270,7 +272,7 @@ export function daysBefore(now: Date, days: number): Date {
 
 export const userListQuery = z.object({
   search,
-  role: filter(z.enum(["ADMIN", "DRIVER"], "Invalid role")),
+  role: filter(z.enum(["ADMIN", "DISPATCHER", "DRIVER"], "Invalid role")),
   status: filter(z.enum(["active", "inactive"], "Invalid status")),
   organizationId: id,
   page,
@@ -328,7 +330,7 @@ export function toUserRow(u: UserRowRecord): PlatformUserRow {
     id: u.id,
     name: u.name,
     email: u.email,
-    role: u.role === "DRIVER" ? "DRIVER" : "ADMIN",
+    role: u.role === "DRIVER" || u.role === "DISPATCHER" ? u.role : "ADMIN",
     active: u.active,
     mustChangePassword: u.mustChangePassword,
     lastLoginAt: iso(u.lastLoginAt),
@@ -488,6 +490,16 @@ export async function deleteOrgData(tx: Prisma.TransactionClient, organizationId
   const deliveryEvents = (await tx.deliveryEvent.deleteMany({ where: w.deliveryEvents })).count;
   const assignments = (await tx.assignment.deleteMany({ where: w.assignments })).count;
   const deliveries = (await tx.delivery.deleteMany({ where: w.deliveries })).count;
+  // COD handovers reference the company's drivers; they go with the deliveries.
+  await tx.codSettlement.deleteMany({ where: { organizationId } });
+  // Invoices are the company's billing history; the platform audit rows about them survive.
+  await tx.invoice.deleteMany({ where: { organizationId } });
+  // Integrations and map data (webhook deliveries cascade with their endpoint).
+  await tx.webhookDelivery.deleteMany({ where: { organizationId } });
+  await tx.webhookEndpoint.deleteMany({ where: { organizationId } });
+  await tx.apiKey.deleteMany({ where: { organizationId } });
+  await tx.deliveryZone.deleteMany({ where: { organizationId } });
+  await tx.driverLocation.deleteMany({ where: { organizationId } });
   const importBatches = (await tx.importBatch.deleteMany({ where: w.importBatches })).count;
   const driverProfiles = (await tx.driverProfile.deleteMany({ where: w.driverProfiles })).count;
   const vehicles = (await tx.vehicle.deleteMany({ where: w.vehicles })).count;

@@ -1,7 +1,9 @@
 import { NextResponse } from "next/server";
 import { Prisma } from "@prisma/client";
 import * as Sentry from "@sentry/nextjs";
-import { getSessionUser, type SessionUser } from "@/lib/auth";
+import { getSessionState, type SessionUser } from "@/lib/auth";
+import { IDLE_SESSION_MESSAGE } from "@/lib/session-policy";
+import { isStaffRole } from "@/lib/roles";
 
 export class ApiError extends Error {
   status: number;
@@ -44,18 +46,28 @@ export function fail(e: unknown) {
  * reach the endpoint that lets them replace it.
  */
 export async function requireUser(opts: { allowPasswordChangePending?: boolean } = {}): Promise<SessionUser> {
-  const user = await getSessionUser();
-  if (!user) throw new ApiError(401, "Authentication required");
+  const { user, ended } = await getSessionState();
+  if (!user) throw new ApiError(401, ended === "idle" ? IDLE_SESSION_MESSAGE : "Authentication required");
   if (user.mustChangePassword && !opts.allowPasswordChangePending) {
     throw new ApiError(403, "Change your temporary password before continuing");
   }
   return user;
 }
 
+/** Settings, team, billing and audit — admins only (see src/lib/roles.ts). */
 export async function requireAdmin(): Promise<SessionUser> {
   const user = await requireUser();
   if (user.role !== "ADMIN") {
     throw new ApiError(403, "Admin access required");
+  }
+  return user;
+}
+
+/** Day-to-day operations — admins and dispatchers. */
+export async function requireStaff(): Promise<SessionUser> {
+  const user = await requireUser();
+  if (!isStaffRole(user.role)) {
+    throw new ApiError(403, "Admin or dispatcher access required");
   }
   return user;
 }

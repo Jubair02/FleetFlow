@@ -1,5 +1,5 @@
 import { db } from "@/lib/db";
-import { ApiError, fail, ok, readJson, requireAdmin } from "@/lib/api-helpers";
+import { ApiError, fail, ok, readJson, requireStaff } from "@/lib/api-helpers";
 import { trackingActionSchema, firstError } from "@/lib/validation";
 import { TX_OPTIONS, generateTrackingToken, lockDelivery } from "@/lib/delivery";
 import { auditData } from "@/lib/notify";
@@ -10,7 +10,7 @@ type Params = { params: Promise<{ id: string }> };
 // action: regenerate (new unguessable token) | revoke | restore
 export async function POST(req: Request, { params }: Params) {
   try {
-    const user = await requireAdmin();
+    const user = await requireStaff();
     const { id } = await params;
 
     const parsed = trackingActionSchema.safeParse(await readJson<unknown>(req));

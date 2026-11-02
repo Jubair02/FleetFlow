@@ -1,6 +1,6 @@
 # FleetFlow billing — minimal subscription model
 
-FleetFlow has **no payment gateway**. Plans live in the database, are edited by platform admins in the
+FleetFlow has **no payment gateway**: invoices are issued in the app and paid manually (§0). Plans live in the database, are edited by platform admins in the
 **/platform → Plans** console, and are assigned to organizations by hand.
 The prices are a **proposed hypothesis** that customer interviews have not yet tested.
 This document describes the model, how limits and features are enforced, and the manual billing process.
@@ -14,6 +14,38 @@ Code references:
 - `GET /api/billing` returns the organization's plan, usage and subscription for admins.
 - `/api/platform/plans/**` and `PATCH /api/platform/organizations/[id]` (`set-plan`) are the platform admin APIs.
 - `scripts/set-plan.mjs` assigns a plan from the command line (same rules as the console).
+
+---
+
+## 0. Invoices & manual payments (implemented)
+
+There is still **no online checkout**: invoices are paid by bKash / Nagad / Rocket / bank transfer and verified by FleetFlow staff. A gateway can be added later behind `src/lib/payments` (`PaymentProvider.startCheckout`). Code: `src/lib/billing.ts` (rules), `src/lib/billing-types.ts` (API contract), `src/lib/payments/*` (how to pay), `model Invoice`.
+
+**Lifecycle.** `OPEN` → `PAID` (platform admin records the payment) or `VOID` (with a reason). While `OPEN`, the company can report a payment ("I've paid": method + transaction ID, required for bKash/Nagad/Rocket); it then shows as *Payment reported* and appears under **/platform → Overview → Payments to verify**. Numbers are `FF-<year>-<5-digit sequence>`, sequential per Asia/Dhaka year, unique (a concurrent collision is retried with the next number).
+
+**Where invoices come from.**
+1. **Renewals (daily cron).** For organizations that are not suspended, have `subscriptionStatus` ACTIVE or PAST_DUE and an agreed price > 0, and whose `paidUntil` is within 7 days (or ended less than 30 days ago): one invoice for the next period — `periodStart = paidUntil`, `periodEnd = +1 month / +1 year` (month-end safe: 31 Jan → 28/29 Feb), `dueAt = paidUntil`, amount = `subscriptionPriceBdt`. Exactly once per period (`@@unique([organizationId, periodStart])`). **ACTIVE organizations without `paidUntil` are never auto-invoiced** (open-ended manual deals); issue their invoices by hand — once one is paid, `paidUntil` is set and renewals start.
+2. **Self-service "Request invoice"** (Settings → Plan & billing, admins only). Available on trial, when cancelled, or once `paidUntil` has passed; a running paid subscription must contact FleetFlow to change plans. The company picks a public paid plan and cycle; the amount is the list price (or its grandfathered price when renewing the same plan and cycle). Any other OPEN invoice is voided ("Replaced by …"), so there is at most one to pay; refused (409) while a reported payment awaits verification. Due in 7 days.
+3. **Manual (platform admin)**, organization → Subscription tab → *Create invoice*: any plan (active, or the current one), cycle and amount; optional period start (default: continue from `paidUntil`, else starts when paid) and due date.
+
+**Marking paid** (platform admin: date, method, reference, note) runs in one transaction with a platform audit row (`INVOICE_PAID`) and a tenant audit row:
+- **Period.** An invoice that continues the current paid period (`periodStart == paidUntil`) or starts after the payment date keeps its dates. Any other invoice (new subscription, plan change, reactivation, a request made days before paying) is *provisional* and **restarts on the payment date** — nobody pays for days before they paid. The stored period is rewritten to what was actually paid for.
+- `paidUntil = max(paidUntil, periodEnd)`; `subscriptionStatus = ACTIVE`.
+- **Plan change.** If the invoice's plan or cycle differs from the organization's, or the organization is on TRIAL, the organization moves to that plan and cycle and the invoice amount becomes its agreed price (`subscriptionPriceBdt`, `planAssignedAt`). A same-plan renewal never touches the agreed price. *Caveat:* if you change an organization's plan while a renewal invoice for the old plan is open, void that invoice — paying it would switch the plan back.
+- No proration and no credit for unused time.
+
+**Overdue.** The cron marks ACTIVE → PAST_DUE when an OPEN, unreported invoice is past due **and** `paidUntil` has passed (audit `SUBSCRIPTION_PAST_DUE`). It is only a label: grace and read-only timing still come from `paidUntil` (`src/lib/subscription.ts`), so nothing is penalised twice. Paying sets ACTIVE again.
+
+**Notifications.** Invoice issued and payment confirmed → the company's ADMIN users (in-app + email, deduped per invoice). Payment reported → `BILLING_NOTIFY_EMAIL` if set (otherwise only logged). Invoice emails sit in the company's outbox like other emails.
+
+**Settings (environment).** `PAYMENT_PROVIDER` (default `manual`), `PAYMENT_BKASH_NUMBER`, `PAYMENT_NAGAD_NUMBER`, `PAYMENT_ROCKET_NUMBER`, `PAYMENT_BANK_DETAILS` (`\n` = new line), `BILLING_NOTIFY_EMAIL`. Platform settings store no payment details, so they live in the environment.
+
+**APIs.**
+- Company (admin session, own organization only): `GET /api/billing/invoices`, `POST /api/billing/invoices` `{ planCode, billingCycle }`, `POST /api/billing/invoices/[id]/report` `{ method, reference }`, `GET /api/billing/invoices/[id]/print` (printable HTML).
+- Platform (`requirePlatformAdmin`, every write audited): `GET /api/platform/invoices?organizationId=&status=&reported=1`, `POST /api/platform/invoices` `{ organizationId, planCode, billingCycle, amountBdt, periodStart?, dueAt?, notes? }`, `PATCH /api/platform/invoices/[id]` `{ action: "mark-paid", paidAt?, method, reference?, note? }` / `{ action: "void", reason }`.
+- Deleting an organization deletes its invoices (platform audit rows survive).
+
+The manual ledger in §5 is no longer needed for invoices created here; §5 still describes agreements, plan changes and non-payment.
 
 ---
 

@@ -38,6 +38,9 @@ export const IMPORT_COLUMNS = [
   "instructions",
   "priority",
   "expected_delivery",
+  // Delivery charges (docs/ZONES.md) — last, so pasted rows in the old template order still line up.
+  "weight_kg",
+  "delivery_fee",
 ] as const;
 export type ImportColumn = (typeof IMPORT_COLUMNS)[number];
 
@@ -55,6 +58,8 @@ export const COLUMN_ALIASES: Record<ImportColumn, readonly string[]> = {
   instructions: ["instructions", "delivery instructions", "notes", "note", "remarks", "comment", "comments"],
   priority: ["priority"],
   expected_delivery: ["expected_delivery", "expected", "expected date", "expected_at", "delivery date", "due", "due date", "deadline"],
+  weight_kg: ["weight_kg", "weight", "weight kg", "weight (kg)", "kg", "parcel weight", "package weight"],
+  delivery_fee: ["delivery_fee", "delivery fee", "delivery charge", "delivery_charge", "shipping fee", "shipping charge", "courier charge", "charge", "fee"],
 };
 
 export const COLUMN_LABELS: Record<ImportColumn, string> = {
@@ -67,6 +72,8 @@ export const COLUMN_LABELS: Record<ImportColumn, string> = {
   instructions: "Instructions",
   priority: "Priority",
   expected_delivery: "Expected delivery",
+  weight_kg: "Weight (kg)",
+  delivery_fee: "Delivery charge",
 };
 
 /** Local wall-clock time used when expected_delivery has no time. */
@@ -89,6 +96,8 @@ export const TEMPLATE_ROWS: string[][] = [
     "Call before arrival; shop closes at 9 PM",
     "HIGH",
     "25/10/2026 15:00",
+    "0.5",
+    "",
   ],
   [
     "INV-10232",
@@ -100,6 +109,8 @@ export const TEMPLATE_ROWS: string[][] = [
     "",
     "normal",
     "2026-10-26",
+    "2.5",
+    "150",
   ],
 ];
 
@@ -137,6 +148,10 @@ export interface ImportRowData {
   expectedAt: string | null;
   /** "YYYY-MM-DD HH:mm" in the org timezone, for display. */
   expectedLocal: string | null;
+  /** Parcel weight in kg (null = blank). */
+  weightKg: number | null;
+  /** Delivery charge typed in the file, whole BDT (null = calculate from the zone). */
+  deliveryFeeBdt: number | null;
 }
 
 export interface DuplicateInfo {
@@ -283,6 +298,36 @@ export function localDay(instant: Date, timezone: string = DEFAULT_TIMEZONE): st
   return new Date(instant.getTime() + tzOffsetMinutes(instant, timezone) * 60_000).toISOString().slice(0, 10);
 }
 
+// ── Weight & delivery charge ─────────────────────────────────
+
+type ParsedNumber = { ok: true; value: number | null } | { ok: false; message: string };
+
+/** Bangla digits → ASCII, then trimmed. */
+function asciiDigits(value: string | undefined): string {
+  return (value ?? "").replace(/[০-৯]/g, (d) => String("০১২৩৪৫৬৭৮৯".indexOf(d))).trim();
+}
+
+/** "1.5", "1.5 kg", "2KG" → kg. Blank → null. More than 0 and at most 1000. */
+export function parseWeightKg(value: string | undefined): ParsedNumber {
+  const v = asciiDigits(value).replace(/\s*(kg|kgs|কেজি)$/i, "");
+  if (!v) return { ok: true, value: null };
+  if (!/^\d+(\.\d+)?$/.test(v)) return { ok: false, message: `Weight "${asciiDigits(value)}" isn't a number of kg — e.g. 1.5` };
+  const n = Number(v);
+  if (!(n > 0)) return { ok: false, message: "Weight must be more than 0 kg" };
+  if (n > 1000) return { ok: false, message: "Weight must be at most 1000 kg" };
+  return { ok: true, value: n };
+}
+
+/** "150", "৳150", "Tk 1,200", "120 BDT" → whole taka. Blank → null (calculated from the zone). */
+export function parseFeeBdt(value: string | undefined): ParsedNumber {
+  const v = asciiDigits(value).replace(/^(৳|tk\.?|bdt)\s*/i, "").replace(/\s*(৳|tk\.?|taka|bdt|টাকা)$/i, "").replace(/,(?=\d{3}\b)/g, "");
+  if (!v) return { ok: true, value: null };
+  if (!/^\d+$/.test(v)) return { ok: false, message: `Delivery charge "${asciiDigits(value)}" must be whole taka — e.g. 120` };
+  const n = Number(v);
+  if (n > 100_000) return { ok: false, message: "The delivery charge is too large" };
+  return { ok: true, value: n };
+}
+
 // ── Row validation ───────────────────────────────────────────
 
 const SCHEMA_FIELD: Partial<Record<string, ImportColumn>> = {
@@ -295,6 +340,7 @@ const SCHEMA_FIELD: Partial<Record<string, ImportColumn>> = {
   externalRef: "order_ref",
   priority: "priority",
   expectedAt: "expected_delivery",
+  weightKg: "weight_kg",
 };
 
 const REQUIRED_MESSAGES: Partial<Record<ImportColumn, string>> = {
@@ -341,6 +387,11 @@ export function validateRow(
     warnings.push(`Expected delivery ${expected.local} is in the past — it will show as overdue`);
   }
 
+  const weight = parseWeightKg(raw.weight_kg);
+  if (!weight.ok) addError("weight_kg", weight.message);
+  const fee = parseFeeBdt(raw.delivery_fee);
+  if (!fee.ok) addError("delivery_fee", fee.message);
+
   const candidate = {
     recipientName: raw.recipient_name,
     recipientPhone: raw.recipient_phone,
@@ -351,6 +402,7 @@ export function validateRow(
     recipientEmail: raw.recipient_email,
     priority: prio.ok ? prio.priority : "NORMAL",
     expectedAt: expected.ok && expected.date ? expected.date.toISOString() : null,
+    weightKg: weight.ok ? weight.value : null,
   };
   const parsed = createDeliverySchema.safeParse(candidate);
   if (!parsed.success) {
@@ -378,6 +430,8 @@ export function validateRow(
     priority: prio.ok ? prio.priority : raw.priority,
     expectedAt: expected.ok && expected.date ? expected.date.toISOString() : null,
     expectedLocal: expected.ok ? expected.local : null,
+    weightKg: weight.ok ? weight.value : null,
+    deliveryFeeBdt: fee.ok ? fee.value : null,
   };
 
   // Report errors in column order, like reading the row left to right.

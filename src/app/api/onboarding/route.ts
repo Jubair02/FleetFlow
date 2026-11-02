@@ -17,7 +17,7 @@ export async function GET() {
       db.user.count({ where: { organizationId, role: "DRIVER" } }),
       db.delivery.count({ where: { organizationId } }),
       db.assignment.count({ where: { delivery: { organizationId } } }),
-      db.user.count({ where: { organizationId, role: "ADMIN" } }),
+      db.user.count({ where: { organizationId, role: { in: ["ADMIN", "DISPATCHER"] } } }),
     ]);
     if (!org) throw new ApiError(404, "Organization not found");
     return ok(computeOnboarding({ org, vehicles, drivers, deliveries, assignments, admins }));

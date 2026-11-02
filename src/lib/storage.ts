@@ -3,8 +3,10 @@ import { mkdir, readFile, unlink, writeFile } from "fs/promises";
 import path from "path";
 
 // ─────────────────────────────────────────────────────────────
-// Proof-of-delivery file storage. Files never live in the database and are
-// served only through the authenticated /api/pod/[id] route.
+// Image file storage: proof of delivery (served only through the
+// authenticated /api/pod/[id] route) and company logos for branded tracking
+// pages (saveImageFile(…, "brand"), served by /api/brand/[orgId]/logo).
+// Files never live in the database.
 //
 // - Cloudinary (when CLOUDINARY_CLOUD_NAME/API_KEY/API_SECRET are set):
 //   uploaded as `type=private` assets, readable only through short-lived
@@ -21,6 +23,32 @@ const CLOUD_PREFIX = "cloudinary:";
 const CLOUD_FOLDER = "fleetflow/pod";
 /** Max proof image size. Kept under Vercel's ~4.5 MB request limit; the driver app downsizes photos first. */
 export const MAX_POD_FILE_BYTES = 4 * 1024 * 1024;
+
+/**
+ * What a stored image is for. "pod" = proof of delivery (private, served by
+ * /api/pod/[id]); "brand" = a company logo for tracking pages (served
+ * publicly by /api/brand/[orgId]/logo). Local brand keys are "brand/<id>.<ext>".
+ */
+export type StoredImageKind = "pod" | "brand";
+
+const KINDS: Record<StoredImageKind, { cloudFolder: string; maxBytes: number; tooLarge: string; fallbackName: string; missingStorage: string }> = {
+  pod: {
+    cloudFolder: CLOUD_FOLDER,
+    maxBytes: MAX_POD_FILE_BYTES,
+    tooLarge: "File too large (max 4 MB)",
+    fallbackName: "proof",
+    missingStorage: "Proof-of-delivery storage is not configured (set the CLOUDINARY_* variables)",
+  },
+  brand: {
+    cloudFolder: "fleetflow/brand",
+    maxBytes: 1024 * 1024,
+    tooLarge: "Logo too large (max 1 MB)",
+    fallbackName: "logo",
+    missingStorage: "File storage is not configured (set the CLOUDINARY_* variables)",
+  },
+};
+const LOCAL_BRAND_ROOT = path.join(process.cwd(), "storage", "brand");
+const LOCAL_BRAND_KEY = /^brand\/([a-f0-9]{24}\.(?:png|jpg|webp))$/;
 
 const ALLOWED_MIME = new Set(["image/png", "image/jpeg", "image/webp"]);
 
@@ -53,30 +81,49 @@ export interface StoredFile {
 export class PodFileError extends Error {}
 
 export async function savePodFile(buffer: Buffer, originalName: string): Promise<StoredFile> {
+  return saveImageFile(buffer, originalName, "pod");
+}
+
+/** Store a PNG / JPEG / WebP image (checked by content, never by the client's mime type). */
+export async function saveImageFile(buffer: Buffer, originalName: string, kind: StoredImageKind): Promise<StoredFile> {
+  const opts = KINDS[kind];
   const mimeType = detectImageMime(buffer);
   if (!mimeType || !ALLOWED_MIME.has(mimeType)) {
     throw new PodFileError("Only PNG, JPEG or WebP images are accepted");
   }
-  if (buffer.length > MAX_POD_FILE_BYTES) {
-    throw new PodFileError("File too large (max 4 MB)");
+  if (buffer.length > opts.maxBytes) {
+    throw new PodFileError(opts.tooLarge);
   }
   const id = randomBytes(12).toString("hex");
   const ext = EXT_BY_MIME[mimeType];
-  const fileName = originalName.replace(/[^\w.\- ]/g, "_").slice(0, 80) || "proof";
+  const fileName = originalName.replace(/[^\w.\- ]/g, "_").slice(0, 80) || opts.fallbackName;
 
   const cloud = cloudinaryConfig();
   if (cloud) {
-    await cloudinaryUpload(cloud, buffer, mimeType, `${CLOUD_FOLDER}/${id}`);
-    return { fileKey: `${CLOUD_PREFIX}${CLOUD_FOLDER}/${id}.${ext}`, fileName, mimeType, size: buffer.length };
+    await cloudinaryUpload(cloud, buffer, mimeType, `${opts.cloudFolder}/${id}`);
+    return { fileKey: `${CLOUD_PREFIX}${opts.cloudFolder}/${id}.${ext}`, fileName, mimeType, size: buffer.length };
   }
   if (process.env.VERCEL) {
     // Vercel's filesystem is read-only/ephemeral — a local write would be lost.
-    throw new Error("Proof-of-delivery storage is not configured (set the CLOUDINARY_* variables)");
+    throw new Error(opts.missingStorage);
+  }
+  // Each branch names its folder directly: a computed root makes the bundler
+  // trace (and ship) the whole project with the server code.
+  const name = `${id}.${ext}`;
+  if (kind === "brand") {
+    await mkdir(LOCAL_BRAND_ROOT, { recursive: true });
+    await writeFile(path.join(LOCAL_BRAND_ROOT, name), buffer);
+    return { fileKey: `brand/${name}`, fileName, mimeType, size: buffer.length };
   }
   await mkdir(STORAGE_ROOT, { recursive: true });
-  const fileKey = `${id}.${ext}`;
-  await writeFile(path.join(STORAGE_ROOT, fileKey), buffer);
-  return { fileKey, fileName, mimeType, size: buffer.length };
+  await writeFile(path.join(STORAGE_ROOT, name), buffer);
+  return { fileKey: name, fileName, mimeType, size: buffer.length };
+}
+
+/** Mime type of a stored image from its key's extension. */
+export function storedImageMime(fileKey: string): string | null {
+  const ext = /\.(png|jpg|webp)$/.exec(fileKey)?.[1];
+  return ext === "png" ? "image/png" : ext === "jpg" ? "image/jpeg" : ext === "webp" ? "image/webp" : null;
 }
 
 export async function readPodFile(fileKey: string): Promise<Buffer> {
@@ -105,11 +152,17 @@ export async function deletePodFile(fileKey: string): Promise<void> {
   await unlink(podPath(fileKey)).catch(() => {});
 }
 
+/** Same as readPodFile / deletePodFile — any stored image (proof or logo). */
+export const readStoredFile = readPodFile;
+export const deleteStoredFile = deletePodFile;
+
 // ── local disk ───────────────────────────────────────────────
 
 function podPath(fileKey: string): string {
+  const brand = LOCAL_BRAND_KEY.exec(fileKey);
+  if (brand) return path.join(LOCAL_BRAND_ROOT, brand[1]);
   // Prevent path traversal: fileKey must be a bare filename
-  if (!/^[\w.\-]+$/.test(fileKey)) throw new Error("Invalid file key");
+  if (!/^[\w.-]+$/.test(fileKey)) throw new Error("Invalid file key");
   return path.join(STORAGE_ROOT, fileKey);
 }
 
@@ -135,7 +188,7 @@ function requireCloudinary(): CloudinaryConfig {
 }
 
 function parseCloudKey(fileKey: string): { publicId: string; format: string } {
-  const m = /^cloudinary:([\w/\-]+)\.(png|jpg|webp)$/.exec(fileKey);
+  const m = /^cloudinary:([\w/-]+)\.(png|jpg|webp)$/.exec(fileKey);
   if (!m) throw new Error("Invalid file key");
   return { publicId: m[1], format: m[2] };
 }

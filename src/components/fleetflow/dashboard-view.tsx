@@ -14,6 +14,8 @@ import { liveLabel } from "@/components/fleetflow/dispatch/hero";
 import { DashboardHero, type HeroTileProps } from "@/components/fleetflow/dashboard/hero";
 import { ActivityPanel, DriversPanel, NeedsAttention, PerformanceCard } from "@/components/fleetflow/dashboard/panels";
 import { attentionItems, statusSegments, sumDaily, topDrivers, type AttentionItem } from "@/components/fleetflow/dashboard/model";
+import { displayTimezone } from "@/lib/format";
+import { tzQueryOffset } from "@/lib/zoned";
 
 const POLL_MS = 60_000;
 const MAX_DRIVERS = 6;
@@ -118,8 +120,8 @@ function FirstDeliveryEmptyState() {
 export function DashboardView() {
   const setView = useAppStore((s) => s.setView);
   const session = useAppStore((s) => s.session);
-  // Daily buckets and "today" are keyed by the viewer's local date.
-  const tz = new Date().getTimezoneOffset();
+  // Daily buckets and "today" are keyed by the company's date.
+  const tz = tzQueryOffset(displayTimezone());
   const { data, loading, error, reload } = useApiData<DashboardData>(`/api/dashboard?tz=${tz}`);
 
   // ── Live refresh (every minute while the tab is visible) ────
@@ -208,6 +210,8 @@ export function DashboardView() {
         return { label: "Re-dispatch", run: openDispatch };
       case "urgent":
         return { label: "Assign", run: openDispatch };
+      case "reschedule":
+        return { label: "Review", run: item.singleDeliveryId ? () => goToDelivery(item.singleDeliveryId!) : () => goToDeliveries("RESCHEDULE_REQUESTED") };
       case "vehicles":
         return { label: "View", run: () => setView("vehicles") };
     }
@@ -244,7 +248,8 @@ export function DashboardView() {
         tiles={tiles}
       />
 
-      <OnboardingChecklist />
+      {/* Setup checklist is about settings and team — admins only. */}
+      {session?.role === "ADMIN" && <OnboardingChecklist />}
 
       <div className="grid gap-4 sm:gap-5 xl:grid-cols-3">
         <div className="flex min-w-0 flex-col gap-4 sm:gap-5 xl:col-span-2">

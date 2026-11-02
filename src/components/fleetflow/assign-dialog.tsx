@@ -57,6 +57,8 @@ export function AssignDialog({
 }
 
 export function DeliverySummary({ delivery }: { delivery: Delivery }) {
+  // Captured once per open dialog: the due text needn't tick while assigning.
+  const [nowMs] = useState(() => Date.now());
   const { line1, line2 } = splitAddress(delivery.deliveryAddress);
   return (
     <div className="rounded-2xl border border-border/70 bg-muted/40 p-4 dark:border-white/10">
@@ -68,7 +70,7 @@ export function DeliverySummary({ delivery }: { delivery: Delivery }) {
             Failed · {failureReasonLabel(delivery.failureReason)}
           </span>
         ) : null}
-        <DueText delivery={delivery} nowMs={Date.now()} className="ml-auto" />
+        <DueText delivery={delivery} nowMs={nowMs} className="ml-auto" />
       </div>
       <p className="mt-2 text-[15px] font-medium">{delivery.recipientName}</p>
       <p className="mt-1 flex items-start gap-1.5 text-sm text-muted-foreground">

@@ -2,105 +2,116 @@
 
 import { create } from "zustand";
 import type { SessionUser } from "@/lib/types";
+import { appLocation, type AppLocation, type AppView, type SettingsTab } from "@/lib/app-routes";
+import { clearDataCache, revalidateData, type CacheKeyMatcher } from "@/lib/data-cache";
 
-export type AppView =
-  | "dashboard"
-  | "deliveries"
-  | "dispatch"
-  | "drivers"
-  | "vehicles"
-  | "reports"
-  | "notifications"
-  | "audit"
-  | "settings"
-  | "driver-jobs"
-  | "driver-history";
+// Views, roles and addresses are defined in src/lib/app-routes.ts (shared with the server route).
+export { ADMIN_VIEWS, DISPATCHER_VIEWS, DRIVER_VIEWS, allowedViews } from "@/lib/app-routes";
+export type { AppView, SettingsTab } from "@/lib/app-routes";
+export type { CacheKeyMatcher } from "@/lib/data-cache";
 
 export type DeliveriesAction = "create" | "import" | null;
-export type SettingsTab = "company" | "team" | "plan";
 
 interface AppStore {
   session: SessionUser | null;
   setSession: (u: SessionUser | null) => void;
+  // ── navigation (mirrored in the address bar by src/store/app-history.ts) ──
   view: AppView;
+  /** Open another screen. Re-selecting the current screen keeps its tab / filter. */
   setView: (v: AppView) => void;
-  /** Bump to trigger a data refetch in every mounted view. */
-  refreshKey: number;
-  bump: () => void;
-  /** Navigate to a delivery's detail (deliveries view / driver portal). */
+  /** Open delivery detail (deliveries view) or job detail (driver portal); null closes it. */
   focusDeliveryId: string | null;
   focusDelivery: (id: string | null) => void;
-  /** One-shot status filter the Deliveries view applies when it mounts (e.g. "FAILED"). */
-  deliveriesStatusPreset: string | null;
-  setDeliveriesStatusPreset: (status: string | null) => void;
+  /** Deliveries list status filter as shown in the address (?status=FAILED); null = all. */
+  deliveriesStatus: string | null;
+  setDeliveriesStatus: (status: string | null) => void;
+  /** Settings tab as shown in the address (/settings/<tab>). */
+  settingsTab: SettingsTab;
+  setSettingsTab: (tab: SettingsTab) => void;
+  /** Apply a whole location at once (address bar → store: boot, Back/Forward). */
+  navigate: (loc: AppLocation) => void;
   /** One-shot action the Deliveries view runs when it mounts (open the create or import dialog), then clears. */
   deliveriesAction: DeliveriesAction;
   setDeliveriesAction: (action: DeliveriesAction) => void;
-  /** One-shot tab the Settings view opens on when it mounts. */
-  settingsTabPreset: SettingsTab | null;
-  setSettingsTabPreset: (tab: SettingsTab | null) => void;
-  /** Clear the session and all navigation state (logout / expired session). */
+  // ── data refresh ──
+  /** Incremented on every bump (kept for anything that wants to observe refreshes). */
+  refreshKey: number;
+  /**
+   * Refetch cached API data after a mutation. No argument = every request
+   * (what most mutations want); pass a URL prefix, a list of prefixes or a
+   * predicate to refresh only those, e.g. bump("/api/notifications").
+   */
+  bump: (match?: CacheKeyMatcher) => void;
+  /** Clear the session, all navigation state and the request cache (logout / expired session). */
   signOut: () => void;
 }
+
+const NAV_RESET = {
+  view: "dashboard" as AppView,
+  focusDeliveryId: null,
+  deliveriesStatus: null,
+  settingsTab: "company" as SettingsTab,
+  deliveriesAction: null,
+};
 
 export const useAppStore = create<AppStore>((set) => ({
   session: null,
   setSession: (u) => set({ session: u }),
-  view: "dashboard",
-  setView: (v) => set({ view: v }),
-  refreshKey: 0,
-  bump: () => set((s) => ({ refreshKey: s.refreshKey + 1 })),
-  focusDeliveryId: null,
+  ...NAV_RESET,
+  setView: (v) =>
+    set((s) => (s.view === v ? s : { view: v, deliveriesStatus: null, settingsTab: "company" })),
   focusDelivery: (id) => set({ focusDeliveryId: id }),
-  deliveriesStatusPreset: null,
-  setDeliveriesStatusPreset: (status) => set({ deliveriesStatusPreset: status }),
-  deliveriesAction: null,
+  setDeliveriesStatus: (status) => set({ deliveriesStatus: status }),
+  setSettingsTab: (tab) => set({ settingsTab: tab }),
+  navigate: (loc) =>
+    set((s) => ({
+      view: loc.view,
+      focusDeliveryId: loc.deliveryId,
+      // A detail address carries no filter: keep the list's filter underneath it.
+      deliveriesStatus: loc.deliveryId && s.view === loc.view ? s.deliveriesStatus : loc.status,
+      settingsTab: loc.settingsTab,
+    })),
   setDeliveriesAction: (action) => set({ deliveriesAction: action }),
-  settingsTabPreset: null,
-  setSettingsTabPreset: (tab) => set({ settingsTabPreset: tab }),
-  signOut: () =>
-    set({
-      session: null,
-      view: "dashboard",
-      focusDeliveryId: null,
-      deliveriesStatusPreset: null,
-      deliveriesAction: null,
-      settingsTabPreset: null,
-    }),
+  refreshKey: 0,
+  bump: (match) => {
+    set((s) => ({ refreshKey: s.refreshKey + 1 }));
+    void revalidateData(match);
+  },
+  signOut: () => {
+    set({ session: null, ...NAV_RESET });
+    clearDataCache();
+  },
 }));
 
-export const ADMIN_VIEWS: AppView[] = ["dashboard", "deliveries", "dispatch", "drivers", "vehicles", "reports", "notifications", "audit", "settings"];
-export const DRIVER_VIEWS: AppView[] = ["driver-jobs", "driver-history", "notifications"];
-
-/** Views a role may open; anything else falls back to the role's home view. */
-export function allowedViews(role: string): AppView[] {
-  return role === "DRIVER" ? DRIVER_VIEWS : ADMIN_VIEWS;
-}
-
-/** Navigate to a delivery detail from anywhere (admin context). */
+/** Navigate to a delivery's detail from anywhere (admin context). */
 export function goToDelivery(id: string) {
-  const { setView, focusDelivery } = useAppStore.getState();
-  focusDelivery(id);
-  setView("deliveries");
+  useAppStore.setState((s) => ({
+    view: "deliveries",
+    focusDeliveryId: id,
+    deliveriesStatus: s.view === "deliveries" ? s.deliveriesStatus : null,
+  }));
 }
 
 /** Open the Deliveries view pre-filtered to a status (admin context). */
 export function goToDeliveries(status: string | null) {
-  const { setView, setDeliveriesStatusPreset } = useAppStore.getState();
-  setDeliveriesStatusPreset(status);
-  setView("deliveries");
+  useAppStore.setState({ view: "deliveries", focusDeliveryId: null, deliveriesStatus: status });
 }
 
 /** Open the Deliveries view and immediately start creating or importing deliveries (admin context). */
 export function goToDeliveriesAction(action: Exclude<DeliveriesAction, null>) {
-  const { setView, setDeliveriesAction } = useAppStore.getState();
-  setDeliveriesAction(action);
-  setView("deliveries");
+  useAppStore.setState((s) => ({
+    view: "deliveries",
+    deliveriesAction: action,
+    deliveriesStatus: s.view === "deliveries" ? s.deliveriesStatus : null,
+  }));
 }
 
 /** Open a specific Settings tab (admin context). */
 export function goToSettings(tab: SettingsTab = "company") {
-  const { setView, setSettingsTabPreset } = useAppStore.getState();
-  setSettingsTabPreset(tab);
-  setView("settings");
+  useAppStore.setState({ view: "settings", settingsTab: tab });
+}
+
+/** The store's navigation state as an address-bar location. */
+export function currentAppLocation(s: Pick<AppStore, "view" | "focusDeliveryId" | "deliveriesStatus" | "settingsTab"> = useAppStore.getState()): AppLocation {
+  return appLocation(s.view, { deliveryId: s.focusDeliveryId, status: s.deliveriesStatus, settingsTab: s.settingsTab });
 }
